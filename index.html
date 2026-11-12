@@ -97,6 +97,9 @@ input:focus,textarea:focus{border-color:var(--accent)}
 .play{position:absolute;left:50%;top:42%;transform:translate(-50%,-50%);width:46px;height:46px;border-radius:50%;background:rgba(0,0,0,.6);color:#fff;display:grid;place-items:center;font-size:17px;pointer-events:none}
 .sc .img .play{top:50%}
 img.noimg{visibility:hidden}
+.sc .img iframe.emb{width:100%;height:100%;border:0;pointer-events:none;background:#fff}
+iframe.embBig{width:100%;height:min(70vh,620px);border:0;border-radius:14px;background:#fff;margin-bottom:12px}
+.igb{position:absolute;top:8px;left:8px;font-size:10px;font-weight:700;padding:2px 6px;border-radius:6px;background:linear-gradient(45deg,#f09433,#dc2743,#bc1888);color:#fff}
 #lassoSvg{position:fixed;inset:0;pointer-events:none;z-index:6}
 #lassoSvg path{fill:rgba(240,153,123,.12);stroke:var(--accent);stroke-width:2;stroke-dasharray:6 5}
 #canvasBtns{position:fixed;right:12px;bottom:calc(var(--safeB) + 16px);display:flex;flex-direction:column;gap:10px;z-index:8}
@@ -318,11 +321,14 @@ async function load(quiet) {
 /* ---------------- images ---------------- */
 function ytId(u) { const m = String(u || '').match(/(?:youtu\.be\/|[?&]v=|shorts\/)([\w-]{11})/); return m && m[1]; }
 const isVideoLink = u => /instagram\.com\/(reel|reels|tv)\/|tiktok\.com\/|youtu\.?be|vimeo\.com\//i.test(u || '');
+function igCode(u) { const m = String(u || '').match(/instagram\.com\/(?:[^/]+\/)?(?:p|reel|reels|tv)\/([\w-]+)/); return m && m[1]; }
+const igEmbed = it => { const c = igCode(it.pageUrl); return c ? 'https://www.instagram.com/p/' + c + '/embed/' : ''; };
 function visualOf(it) {
   const yt = ytId(it.pageUrl);
   if (it.kind === 'video') return { img: !!it.fileId, play: true };
   if (it.kind === 'image' && (it.imageUrl || it.fileId)) return { img: true, play: isVideoLink(it.pageUrl) };
   if (yt) return { img: true, src: 'https://img.youtube.com/vi/' + yt + '/hqdefault.jpg', play: true };
+  if (igCode(it.pageUrl)) return { img: false, embed: igEmbed(it), play: isVideoLink(it.pageUrl) };
   return { img: false, play: isVideoLink(it.pageUrl) };
 }
 function imgSrcFor(it, el) {
@@ -370,12 +376,13 @@ function renderDeck() {
     const depth = arr.length - 1 - idxRev;
     let c = deck.querySelector('.sc[data-id="' + it.id + '"]:not(.gone)');
     if (!c) {
-      c = document.createElement('div'); c.className = 'sc' + (hasImage(it) ? '' : ' textonly'); c.dataset.id = it.id;
-      c.innerHTML = '<div class="img"><img alt="" draggable="false">' + (visualOf(it).play ? '<div class="play">▶</div>' : '') + '</div><div class="txt"><h3>' + esc(it.title || it.tag || 'Untitled') + '</h3><p>' +
+      const vv = visualOf(it);
+      c = document.createElement('div'); c.className = 'sc' + (vv.img || vv.embed ? '' : ' textonly'); c.dataset.id = it.id;
+      c.innerHTML = '<div class="img">' + (vv.embed && !vv.img ? '<iframe class="emb" src="' + vv.embed + '" loading="lazy" scrolling="no" tabindex="-1"></iframe>' : '<img alt="" draggable="false">') + (vv.play && !vv.embed ? '<div class="play">▶</div>' : '') + '</div><div class="txt"><h3>' + esc(it.title || it.tag || 'Untitled') + '</h3><p>' +
         esc(it.note || '') + '</p><div class="chips">' + allTags(it).map(t => '<span class="chip">' + esc(t) + '</span>').join('') +
         (it.pageUrl ? '<a class="chip" href="' + esc(it.pageUrl) + '" target="_blank" rel="noopener">source ↗</a>' : '') +
         '</div></div><div class="stamp yes">KEEP</div><div class="stamp no">NOPE</div>';
-      if (hasImage(it)) imgSrcFor(it, c.querySelector('img'));
+      if (vv.img) imgSrcFor(it, c.querySelector('img'));
       c.style.transform = 'translateY(' + (depth + 1) * 10 + 'px) scale(' + (1 - (depth + 1) * 0.04) + ')';
     }
     const gone = deck.querySelector('.sc.gone');
@@ -492,7 +499,7 @@ function renderCanvas() {
     if (n.dataset.sig !== sig) {
       n.dataset.sig = sig;
       n.innerHTML = '<div class="fl"><div class="cc' + (v.img ? '' : ' text') + '">' + (v.img ? '<img alt="" draggable="false">' : '') +
-        (v.play ? '<div class="play">▶</div>' : '') +
+        (v.play ? '<div class="play">▶</div>' : '') + (v.embed ? '<div class="igb">IG</div>' : '') +
         '<div class="t"><b>' + esc(it.title || (v.img ? '' : 'Note')) + '</b><span>' + esc(v.img ? allTags(it).join(' · ') : (it.note || '')) + '</span></div>' +
         (ncom ? '<div class="dot">' + ncom + '</div>' : '') + '</div></div>';
       if (v.img) imgSrcFor(it, n.querySelector('img'));
@@ -757,7 +764,8 @@ function fmt(t) { try { return new Date(t).toLocaleString([], { month: 'short', 
 
 function openDetail(it, focusComment, focusDelete) {
   const img = hasImage(it);
-  sheet('detail', (img ? '<img class="big" id="dImg" alt="">' : '') +
+  const vd = visualOf(it);
+  sheet('detail', (vd.embed ? '<iframe class="embBig" src="' + vd.embed + '" scrolling="no"></iframe>' : img ? '<img class="big" id="dImg" alt="">' : '') +
     '<h2>' + esc(it.title || it.tag || 'Untitled') + '</h2>' + (it.note ? '<p class="note">' + esc(it.note) + '</p>' : '') +
     '<label>Tags</label><input id="dTags" value="' + esc((it.tags || []).join(', ')) + '" placeholder="add tags, comma separated">' +
     (it.tag ? '<p class="muted" style="margin:6px 2px 0">Folder: ' + esc(it.tag) + '</p>' : '') +

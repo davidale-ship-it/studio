@@ -243,11 +243,10 @@ function thumb_(fileId) {
   if (!fileId) return { ok: false, error: 'no file' };
   const f = DriveApp.getFileById(fileId);
   let blob = null;
-  try { blob = f.getThumbnail(); } catch (e) {}
-  if (!blob || blob.getBytes().length < 200) {
-    if (f.getSize() > 3 * 1024 * 1024) return { ok: false, error: 'too big for preview' };
-    blob = f.getBlob();
-  }
+  const isImg = (f.getMimeType() || '').indexOf('image/') === 0;
+  if (isImg && f.getSize() <= 1.5 * 1024 * 1024) blob = f.getBlob();
+  if (!blob) { try { blob = f.getThumbnail(); } catch (e) {} }
+  if (!blob || blob.getBytes().length < 200) return { ok: false, error: 'no preview yet' };
   return { ok: true, mime: blob.getContentType(), data: Utilities.base64Encode(blob.getBytes()) };
 }
 
@@ -361,7 +360,9 @@ function downloadPending_() {
       if (r[16] !== 'pending') continue;
       let file = null, err = '';
       try {
-        const blob = fetchImage_(r[8]);
+        const src = r[8] || igImage_(r[5]);
+        if (!src) throw new Error('no picture found');
+        const blob = fetchImage_(src);
         const type = blob.getContentType().toLowerCase();
         const ext = type.split('/')[1].split(/[+;]/)[0].replace('jpeg', 'jpg');
         file = folder_(clean_(r[2] || 'Other')).createFile(blob.setName(
@@ -372,7 +373,7 @@ function downloadPending_() {
       withLock_(() => {
         const row = findRow_(r[9]);
         if (!row) { if (file) file.setTrashed(true); return; }   // deleted meanwhile
-        if (file) { sh.getRange(row, 7).setValue(file.getUrl()); sh.getRange(row, 17).setValue(file.getId()); }
+        if (file) { sh.getRange(row, 7).setValue(file.getUrl()); sh.getRange(row, 17).setValue(file.getId()); sh.getRange(row, 16).setValue('image'); }
         else { sh.getRange(row, 17).setValue('failed'); }
       });
       if (err) fail_(r[8], err + ' (card still shows the web image)');
@@ -380,6 +381,23 @@ function downloadPending_() {
   } finally {
     dl.releaseLock();
   }
+}
+
+/** Picture of a public Instagram post, read from Instagram's official embed page. */
+function igImage_(pageUrl) {
+  const code = igCode_(pageUrl);
+  if (!code) return '';
+  const res = UrlFetchApp.fetch('https://www.instagram.com/p/' + code + '/embed/captioned/', {
+    muteHttpExceptions: true, followRedirects: true,
+    headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36' }
+  });
+  if (res.getResponseCode() !== 200) return '';
+  const html = res.getContentText();
+  let m = html.match(/class="EmbeddedMediaImage"[^>]*src="([^"]+)"/) || html.match(/<img[^>]+class="[^"]*EmbeddedMediaImage[^"]*"[^>]+src="([^"]+)"/);
+  if (!m) m = html.match(/"display_url"\s*:\s*"([^"]+)"/);
+  if (!m) m = html.match(/<meta property="og:image" content="([^"]+)"/);
+  if (!m) return '';
+  return m[1].replace(/&amp;/g, '&').replace(/\\u0026/g, '&').replace(/\\\//g, '/');
 }
 
 function fetchImage_(url) {
@@ -397,10 +415,14 @@ function cardRow_(d, by, status) {
   const url = d.imageUrl && /^https?:\/\//.test(d.imageUrl) ? d.imageUrl : '';
   return [new Date(), url ? '=IMAGE("' + url.replace(/"/g, '%22') + '")' : '', safe_(clean_(d.tag || 'Other')),
     safe_(d.title || ''), safe_(d.note || ''), safe_(d.pageUrl || ''), '', by, safe_(url), newId_(), status || 'new',
-    '', '', safe_((d.tags || []).map(clean_).join(', ')), '[]', url ? 'image' : (d.pageUrl ? 'link' : 'text'), url ? 'pending' : ''];
+    '', '', safe_((d.tags || []).map(clean_).join(', ')), '[]', url ? 'image' : (d.pageUrl ? 'link' : 'text'), (url || igCode_(d.pageUrl)) ? 'pending' : ''];
 }
 
+function igCode_(u) { const m = String(u || '').match(/instagram\.com\/(?:[^/]+\/)?(?:p|reel|reels|tv)\/([\w-]+)/); return m ? m[1] : ''; }
+
 function itemKey_(imageUrl, title, pageUrl) {
+  const ig = igCode_(pageUrl);
+  if (ig) return 'ig:' + ig;
   return imageUrl ? 'i:' + String(imageUrl).trim() : 't:' + String(title || '').trim().toLowerCase() + '|' + String(pageUrl || '').trim();
 }
 
