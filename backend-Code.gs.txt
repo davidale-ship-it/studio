@@ -361,11 +361,13 @@ function downloadPending_() {
       if (Date.now() - start > 240000) break;
       const r = vals[i];
       if (r[16] !== 'pending') continue;
+      if (!r[8]) {   // nothing to copy (e.g. Instagram: the app shows the live post)
+        withLock_(() => { const row = findRow_(r[9]); if (row) sh.getRange(row, 17).setValue(''); });
+        continue;
+      }
       let file = null, err = '';
       try {
-        const src = r[8] || igImage_(r[5]);
-        if (!src) throw new Error('no picture found');
-        const blob = fetchImage_(src);
+        const blob = fetchImage_(r[8]);
         const type = blob.getContentType().toLowerCase();
         const ext = type.split('/')[1].split(/[+;]/)[0].replace('jpeg', 'jpg');
         file = folder_(clean_(r[2] || 'Other')).createFile(blob.setName(
@@ -387,23 +389,6 @@ function downloadPending_() {
   }
 }
 
-/** Picture of a public Instagram post, read from Instagram's official embed page. */
-function igImage_(pageUrl) {
-  const code = igCode_(pageUrl);
-  if (!code) return '';
-  const res = UrlFetchApp.fetch('https://www.instagram.com/p/' + code + '/embed/captioned/', {
-    muteHttpExceptions: true, followRedirects: true,
-    headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36' }
-  });
-  if (res.getResponseCode() !== 200) return '';
-  const html = res.getContentText();
-  let m = html.match(/class="EmbeddedMediaImage"[^>]*src="([^"]+)"/) || html.match(/<img[^>]+class="[^"]*EmbeddedMediaImage[^"]*"[^>]+src="([^"]+)"/);
-  if (!m) m = html.match(/"display_url"\s*:\s*"([^"]+)"/);
-  if (!m) m = html.match(/<meta property="og:image" content="([^"]+)"/);
-  if (!m) return '';
-  return m[1].replace(/&amp;/g, '&').replace(/\\u0026/g, '&').replace(/\\\//g, '/');
-}
-
 function fetchImage_(url) {
   const res = UrlFetchApp.fetch(url, {
     muteHttpExceptions: true, followRedirects: true,
@@ -419,7 +404,7 @@ function cardRow_(d, by, status) {
   const url = d.imageUrl && /^https?:\/\//.test(d.imageUrl) ? d.imageUrl : '';
   return [new Date(), url ? '=IMAGE("' + url.replace(/"/g, '%22') + '")' : '', safe_(clean_(d.tag || 'Other')),
     safe_(d.title || ''), safe_(d.note || ''), safe_(d.pageUrl || ''), '', by, safe_(url), newId_(), status || 'new',
-    '', '', safe_((d.tags || []).map(clean_).join(', ')), '[]', url ? 'image' : (d.pageUrl ? 'link' : 'text'), (url || igCode_(d.pageUrl)) ? 'pending' : ''];
+    '', '', safe_((d.tags || []).map(clean_).join(', ')), '[]', url ? 'image' : (d.pageUrl ? 'link' : 'text'), url ? 'pending' : ''];
 }
 
 function igCode_(u) { const m = String(u || '').match(/instagram\.com\/(?:[^/]+\/)?(?:p|reel|reels|tv)\/([\w-]+)/); return m ? m[1] : ''; }
