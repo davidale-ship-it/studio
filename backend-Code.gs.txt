@@ -346,8 +346,11 @@ function ingest_() {
 
 /** Phase 2 (background): copy each new card's image into Drive. Never blocks the app. */
 function downloadPending_() {
-  const dl = LockService.getDocumentLock();
-  if (!dl.tryLock(500)) return;
+  const props = PropertiesService.getScriptProperties();
+  const until = Number(props.getProperty('DL_UNTIL') || 0);
+  if (Date.now() < until) return;
+  props.setProperty('DL_UNTIL', String(Date.now() + 300000));
+  let done = 0;
   try {
     const start = Date.now();
     const sh = board_();
@@ -376,10 +379,11 @@ function downloadPending_() {
         if (file) { sh.getRange(row, 7).setValue(file.getUrl()); sh.getRange(row, 17).setValue(file.getId()); sh.getRange(row, 16).setValue('image'); }
         else { sh.getRange(row, 17).setValue('failed'); }
       });
-      if (err) fail_(r[8], err + ' (card still shows the web image)');
+      if (err) fail_(r[8] || r[5], err + ' (card still shows the web image)'); else done++;
     }
   } finally {
-    dl.releaseLock();
+    props.deleteProperty('DL_UNTIL');
+    Logger.log('Pictures saved: ' + done);
   }
 }
 
