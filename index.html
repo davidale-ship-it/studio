@@ -6,12 +6,12 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="Studio">
+<meta name="apple-mobile-web-app-title" content="Art Studio">
 <meta name="theme-color" content="#0c0c0f">
 <link rel="manifest" href="manifest.json">
 <link rel="apple-touch-icon" href="icon-180.png">
 <link rel="icon" href="icon-192.png">
-<title>Studio</title>
+<title>Art Studio</title>
 <style>
 :root{
   --bg:#0c0c0f; --panel:#16161b; --panel2:#1e1e25; --line:#2c2c35; --text:#ecebe6; --muted:#8d8b85;
@@ -133,7 +133,7 @@ input:focus,textarea:focus{border-color:var(--accent)}
 
 <div id="bar">
   <button class="icon" id="menuBtn" aria-label="Tags and groups">☰</button>
-  <div class="brand"><i></i><span>Studio</span><span id="sync" title="Sync"></span></div>
+  <div class="brand"><i></i><span>Art Studio</span><span id="sync" title="Sync"></span></div>
   <div class="seg" role="tablist">
     <button id="mSwipe" class="on">Swipe</button>
     <button id="mCanvas">Canvas</button>
@@ -182,7 +182,7 @@ input:focus,textarea:focus{border-color:var(--accent)}
 
 <!-- SETUP -->
 <div class="sheet hidden" id="setup"><div class="box">
-  <h2>Connect your Studio</h2>
+  <h2>Connect your Art Studio</h2>
   <p class="muted">Paste the two things from your setup. They stay on this device only.</p>
   <label>Web app URL</label><input id="sUrl" placeholder="https://script.google.com/macros/s/…/exec" autocomplete="off">
   <label>Secret key</label><input id="sKey" autocomplete="off">
@@ -200,7 +200,7 @@ input:focus,textarea:focus{border-color:var(--accent)}
 <div class="sheet hidden" id="ask"><div class="box">
   <button class="close" data-close>✕</button>
   <h2>Ask Claude</h2>
-  <p class="muted">Say what to find. Claude opens with it ready. Tap send there, and results land in your swipe deck in about a minute.</p>
+  <p class="muted">Say what to find. Your request gets copied and your Research chat opens. Paste it there and send. Results land in your swipe deck about a minute later.</p>
   <textarea id="askText" placeholder="e.g. faces made of cracked mirror, contemporary, big scale"></textarea>
   <label>Quick asks</label>
   <div class="btns" id="askQuick">
@@ -208,7 +208,7 @@ input:focus,textarea:focus{border-color:var(--accent)}
     <button class="pill" data-q="What's new this week that I could use: artists, techniques, open calls, tools? Add the best as cards.">What's new</button>
     <button class="pill" data-q="Look at my kept references and suggest 3 artwork ideas that merge them. Add each idea as a text card.">Ideas from my board</button>
   </div>
-  <div class="btns"><button class="pill accent" id="askGo">Open in Claude</button></div>
+  <div class="btns"><button class="pill accent" id="askGo">Copy &amp; open Research</button></div>
 </div></div>
 
 <!-- ADD -->
@@ -664,10 +664,19 @@ function openDetail(it, focusComment, focusDelete) {
 }
 
 /* ---------------- ask claude ---------------- */
+const RESEARCH_URL = 'https://claude.ai/chat/e5f49f61-a849-4d56-a6b8-3ad592d19895';
 function openClaude(text) {
-  const prompt = text + '\n\n(From my Studio app. Use my art-reference-hunt skill to queue anything you find; add ideas or links as text cards in the same batch file.)';
-  window.open('https://claude.ai/new?q=' + encodeURIComponent(prompt), '_blank');
-  toast('Opening Claude… results land in Swipe');
+  const prompt = text + '\n\n(From my Art Studio app. Use my art-reference-hunt skill to queue anything you find; add ideas or links as text cards in the same batch file.)';
+  const go = () => { window.open(RESEARCH_URL, '_blank'); toast('Copied. Paste it in Research and send', 3500); };
+  const fallback = () => {
+    sheet('detail', '<h2>Copy this, then open Research</h2><textarea id="cpTxt" style="min-height:160px">' + esc(prompt) + '</textarea>' +
+      '<div class="btns"><a class="pill accent" href="' + RESEARCH_URL + '" target="_blank" rel="noopener">Open Research</a></div>');
+    const t = $('#cpTxt'); t.focus(); t.select();
+  };
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(prompt).then(go, fallback);
+    else fallback();
+  } catch (e) { fallback(); }
 }
 $('#askBtn').onclick = () => { sheet('ask'); setTimeout(() => $('#askText').focus(), 60); };
 $$('#askQuick [data-q]').forEach(b => b.onclick = () => { $('#askText').value = b.dataset.q; });

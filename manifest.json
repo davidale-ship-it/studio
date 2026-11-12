@@ -1,6 +1,6 @@
 {
-  "name": "Studio",
-  "short_name": "Studio",
+  "name": "Art Studio",
+  "short_name": "Art Studio",
   "description": "Dávid's art studio: swipe references, float ideas on a canvas.",
   "start_url": "./",
   "scope": "./",
