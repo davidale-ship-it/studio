@@ -1,0 +1,433 @@
+/**
+ * ART STUDIO - Backend (v2)
+ * Lives inside the "REFERENCE BOARD" Google Sheet (Extensions > Apps Script).
+ *
+ * Free, on Google's servers:
+ *  1. API for the Studio app (swipe deck + canvas): doPost with {key, action, ...}.
+ *  2. Receives images from the "Save to Art Studio" Chrome extension (doPost, no action).
+ *  3. Every minute, reads batch files Claude drops in "00 Inbox" (refs-*.json).
+ *  4. Moves images shared from the phone into "00 Inbox" to References/Phone.
+ * Every item is one row on the Board tab. Groups live on the Groups tab.
+ */
+
+const INBOX_ID  = '1HV0xrBnicFMDxQ-9fs3MrB_xUi1PRK_O'; // ART STUDIO/00 Inbox
+const REFS_ID   = '1Ce1o-rHeD8qfonjPZzJOZ5_0OP8lFm9N'; // ART STUDIO/01 References
+const SYSTEM_ID = '1DXKsfLOlpnPGPgzNSGxTkRJEDMYH2AJO'; // ART STUDIO/99 System
+const BOARD = 'Board';
+const FAILED = 'Failed';
+const GROUPS = 'Groups';
+const COLS = ['Added', 'Preview', 'Tag', 'Title', 'Note', 'Source page', 'Drive file', 'Added by', 'Image URL',
+  'ID', 'Status', 'X', 'Y', 'Tags', 'Comments', 'Kind', 'FileId'];
+const GROUP_COLS = ['ID', 'Name', 'Members', 'Color', 'Created'];
+const MAX_FILES_PER_RUN = 15;
+const TZ = 'Europe/Budapest';
+
+/* ---------- one-time setup ---------- */
+
+function setup() {
+  const props = PropertiesService.getScriptProperties();
+  let key = props.getProperty('KEY');
+  if (!key) {
+    key = Utilities.getUuid().replace(/-/g, '').slice(0, 10);
+    props.setProperty('KEY', key);
+  }
+  migrate();
+  ScriptApp.getProjectTriggers()
+    .filter(t => t.getHandlerFunction() === 'processInbox')
+    .forEach(t => ScriptApp.deleteTrigger(t));
+  ScriptApp.newTrigger('processInbox').timeBased().everyMinutes(1).create();
+  Logger.log('Setup done. Your secret key: ' + key);
+}
+
+/** Adds the app columns and gives every old row an ID. Safe to run again. */
+function migrate() {
+  const sh = board_();
+  const lastCol = Math.max(sh.getLastColumn(), 1);
+  const header = sh.getRange(1, 1, 1, lastCol).getValues()[0];
+  COLS.forEach((c, i) => { if (header[i] !== c) sh.getRange(1, i + 1).setValue(c); });
+  sh.getRange(1, 1, 1, COLS.length).setFontWeight('bold');
+  const n = sh.getLastRow() - 1;
+  if (n > 0) {
+    const driveUrls = sh.getRange(2, 7, n, 1).getValues();
+    const rng = sh.getRange(2, 10, n, 8);
+    const vals = rng.getValues();
+    vals.forEach((r, i) => {
+      if (!r[0]) r[0] = newId_();
+      if (!r[1]) r[1] = 'new';
+      if (!r[5]) r[5] = '[]';
+      if (!r[6]) r[6] = 'image';
+      if (!r[7] && driveUrls[i][0]) { const mm = String(driveUrls[i][0]).match(/\/d\/([^/]+)/); if (mm) r[7] = mm[1]; }
+    });
+    rng.setValues(vals);
+  }
+  groups_();
+  failed_();
+}
+
+function onOpen() {
+  SpreadsheetApp.getUi().createMenu('Studio')
+    .addItem('Process inbox now', 'processInbox')
+    .addItem('Show my key', 'showKey')
+    .addToUi();
+}
+
+function showKey() {
+  SpreadsheetApp.getUi().alert('Your key:  ' +
+    (PropertiesService.getScriptProperties().getProperty('KEY') || 'not set - run setup'));
+}
+
+/* ---------- web entry points ---------- */
+
+function doPost(e) {
+  try {
+    const d = JSON.parse(e.postData.contents);
+    const key = PropertiesService.getScriptProperties().getProperty('KEY');
+    if (!key || d.key !== key) return json_({ ok: false, error: 'wrong key' });
+    if (d.ping) return json_({ ok: true, message: 'connected' });
+    if (d.action) return json_(api_(d));
+    // Chrome extension: you picked this image yourself, so it goes straight to the canvas
+    return json_(saveItem_(d, 'Chrome', 'kept'));
+  } catch (err) {
+    return json_({ ok: false, error: String(err) });
+  }
+}
+
+function doGet() {
+  return json_({ ok: true, message: 'Art Studio backend is running' });
+}
+
+/* ---------- app API ---------- */
+
+function api_(d) {
+  switch (d.action) {
+    case 'list': return { ok: true, items: listItems_(), groups: listGroups_(), time: Date.now() };
+    case 'thumb': return thumb_(d.fileId);
+  }
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    switch (d.action) {
+      case 'update': return updateItem_(d.id, d.patch || {});
+      case 'positions': (d.moves || []).forEach(m => updateItem_(m.id, { x: m.x, y: m.y })); return { ok: true };
+      case 'comment': return addComment_(d.id, d.text);
+      case 'delete': return deleteItem_(d.id);
+      case 'note': return addNote_(d);
+      case 'upload': return saveItem_(d, 'App', 'kept');
+      case 'saveGroup': return saveGroup_(d.group);
+      case 'deleteGroup': return deleteGroup_(d.id);
+      default: return { ok: false, error: 'unknown action ' + d.action };
+    }
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function listItems_() {
+  const sh = board_();
+  const n = sh.getLastRow() - 1;
+  if (n < 1) return [];
+  return sh.getRange(2, 1, n, COLS.length).getValues()
+    .filter(r => r[9])
+    .map(rowToItem_);
+}
+
+function rowToItem_(r) {
+  let comments = [];
+  try { comments = JSON.parse(r[14] || '[]'); } catch (e) {}
+  return {
+    id: String(r[9]),
+    added: r[0] instanceof Date ? r[0].getTime() : r[0],
+    tag: r[2], title: r[3], note: r[4], pageUrl: r[5], driveUrl: r[6], by: r[7], imageUrl: r[8],
+    status: r[10] || 'new',
+    x: r[11] === '' ? null : Number(r[11]),
+    y: r[12] === '' ? null : Number(r[12]),
+    tags: String(r[13] || '').split(',').map(s => s.trim()).filter(Boolean),
+    comments: comments,
+    kind: r[15] || 'image',
+    fileId: r[16] || ''
+  };
+}
+
+function findRow_(id) {
+  const sh = board_();
+  const n = sh.getLastRow() - 1;
+  if (n < 1) return 0;
+  const ids = sh.getRange(2, 10, n, 1).getValues();
+  for (let i = 0; i < ids.length; i++) if (String(ids[i][0]) === String(id)) return i + 2;
+  return 0;
+}
+
+function updateItem_(id, p) {
+  const row = findRow_(id);
+  if (!row) return { ok: false, error: 'not found' };
+  const sh = board_();
+  const set = (col, v) => sh.getRange(row, col).setValue(v);
+  if (p.status !== undefined) set(11, p.status);
+  if (p.x !== undefined) set(12, Math.round(p.x));
+  if (p.y !== undefined) set(13, Math.round(p.y));
+  if (p.tags !== undefined) set(14, safe_((p.tags || []).map(clean_).join(', ')));
+  if (p.title !== undefined) set(4, safe_(p.title));
+  if (p.note !== undefined) set(5, safe_(p.note));
+  return { ok: true };
+}
+
+function addComment_(id, text) {
+  const row = findRow_(id);
+  if (!row || !text) return { ok: false, error: 'not found' };
+  const cell = board_().getRange(row, 15);
+  let list = [];
+  try { list = JSON.parse(cell.getValue() || '[]'); } catch (e) {}
+  list.push({ t: Date.now(), text: String(text).slice(0, 2000) });
+  cell.setValue(JSON.stringify(list));
+  return { ok: true, comments: list };
+}
+
+function deleteItem_(id) {
+  const row = findRow_(id);
+  if (!row) return { ok: false, error: 'not found' };
+  const sh = board_();
+  const fileId = sh.getRange(row, 17).getValue();
+  if (fileId) { try { DriveApp.getFileById(fileId).setTrashed(true); } catch (e) {} }
+  sh.deleteRow(row);
+  // drop it from any group
+  listGroups_().forEach(g => {
+    if (g.members.indexOf(id) >= 0) { g.members = g.members.filter(m => m !== id); saveGroup_(g); }
+  });
+  return { ok: true };
+}
+
+function addNote_(d) {
+  const id = newId_();
+  board_().appendRow([new Date(), '', safe_(d.tag || 'Note'), safe_(d.title || ''), safe_(d.note || ''),
+    safe_(d.pageUrl || ''), '', 'App', '', id, 'kept',
+    d.x == null ? '' : Math.round(d.x), d.y == null ? '' : Math.round(d.y),
+    safe_((d.tags || []).join(', ')), '[]', d.pageUrl ? 'link' : 'text', '']);
+  return { ok: true, id: id };
+}
+
+function thumb_(fileId) {
+  if (!fileId) return { ok: false, error: 'no file' };
+  const f = DriveApp.getFileById(fileId);
+  let blob = null;
+  try { blob = f.getThumbnail(); } catch (e) {}
+  if (!blob || blob.getBytes().length < 200) {
+    if (f.getSize() > 3 * 1024 * 1024) return { ok: false, error: 'too big for preview' };
+    blob = f.getBlob();
+  }
+  return { ok: true, mime: blob.getContentType(), data: Utilities.base64Encode(blob.getBytes()) };
+}
+
+/* ---------- groups ---------- */
+
+function listGroups_() {
+  const sh = groups_();
+  const n = sh.getLastRow() - 1;
+  if (n < 1) return [];
+  return sh.getRange(2, 1, n, GROUP_COLS.length).getValues().filter(r => r[0]).map(r => {
+    let members = [];
+    try { members = JSON.parse(r[2] || '[]'); } catch (e) {}
+    return { id: String(r[0]), name: r[1], members: members, color: r[3] || '' };
+  });
+}
+
+function saveGroup_(g) {
+  if (!g) return { ok: false, error: 'no group' };
+  const sh = groups_();
+  if (!g.id) g.id = newId_();
+  const n = sh.getLastRow() - 1;
+  const ids = n > 0 ? sh.getRange(2, 1, n, 1).getValues() : [];
+  let row = 0;
+  for (let i = 0; i < ids.length; i++) if (String(ids[i][0]) === g.id) row = i + 2;
+  const vals = [g.id, safe_(g.name || 'Group'), JSON.stringify(g.members || []), g.color || '', new Date()];
+  if (row) sh.getRange(row, 1, 1, vals.length).setValues([vals]); else sh.appendRow(vals);
+  return { ok: true, id: g.id };
+}
+
+function deleteGroup_(id) {
+  const sh = groups_();
+  const n = sh.getLastRow() - 1;
+  if (n < 1) return { ok: true };
+  const ids = sh.getRange(2, 1, n, 1).getValues();
+  for (let i = ids.length - 1; i >= 0; i--) if (String(ids[i][0]) === String(id)) sh.deleteRow(i + 2);
+  return { ok: true };
+}
+
+/* ---------- inbox robot (every minute) ---------- */
+
+function processInbox() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(1000)) return;
+  try {
+    const inbox = DriveApp.getFolderById(INBOX_ID);
+    const files = inbox.getFiles();
+    if (!files.hasNext()) return;
+    const doneFolder = subfolder_(DriveApp.getFolderById(SYSTEM_ID), 'Processed batches');
+    let handled = 0;
+    while (files.hasNext() && handled < MAX_FILES_PER_RUN) {
+      const f = files.next();
+      const name = f.getName();
+      const type = f.getMimeType();
+
+      if (/^refs-.*\.json$/i.test(name)) {
+        let batch;
+        try { batch = JSON.parse(f.getBlob().getDataAsString()); }
+        catch (err) { fail_('', 'Bad batch file ' + name + ': ' + err); f.moveTo(doneFolder); handled++; continue; }
+        const items = Array.isArray(batch) ? batch : (batch.items || []);
+        let ok = 0;
+        items.forEach(it => {
+          if (!it.tag && batch.topic) it.tag = batch.topic;
+          try {
+            const r = (it.imageUrl || it.imageBase64) ? saveItem_(it, 'Claude', 'new') : saveCard_(it, 'Claude', 'new');
+            if (r.ok) ok++; else fail_(it.imageUrl || it.pageUrl, r.error);
+          } catch (err) { fail_(it.imageUrl || it.pageUrl, String(err)); }
+        });
+        f.setDescription('Saved ' + ok + ' of ' + items.length + ' on ' + now_());
+        f.moveTo(doneFolder);
+        handled++;
+      } else if (type.indexOf('image/') === 0) {
+        f.moveTo(folder_('Phone'));
+        log_('Phone', { title: name }, f, 'Phone', 'kept');
+        handled++;
+      }
+    }
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/* ---------- saving ---------- */
+
+function saveItem_(d, by, status) {
+  const tag = clean_(d.tag || 'Other');
+  let blob;
+
+  if (d.imageBase64) {
+    blob = Utilities.newBlob(Utilities.base64Decode(d.imageBase64), d.mimeType || 'image/jpeg');
+  } else if (d.imageUrl && d.imageUrl.indexOf('data:') === 0) {
+    const m = d.imageUrl.match(/^data:([^;,]+);base64,(.*)$/);
+    if (!m) return { ok: false, error: 'unsupported data URL' };
+    blob = Utilities.newBlob(Utilities.base64Decode(m[2]), m[1]);
+  } else if (d.imageUrl) {
+    const res = UrlFetchApp.fetch(d.imageUrl, {
+      muteHttpExceptions: true,
+      followRedirects: true,
+      headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh) ArtStudioCollector' }
+    });
+    if (res.getResponseCode() !== 200) return { ok: false, error: 'download failed (' + res.getResponseCode() + ')' };
+    blob = res.getBlob();
+  } else {
+    return { ok: false, error: 'no image given' };
+  }
+
+  const type = (blob.getContentType() || '').toLowerCase();
+  if (type.indexOf('image/') !== 0) return { ok: false, error: 'not an image (' + type + ')' };
+
+  const ext = type.split('/')[1].split(/[+;]/)[0].replace('jpeg', 'jpg');
+  const name = Utilities.formatDate(new Date(), TZ, 'yyyyMMdd-HHmmss') + '_' +
+    slug_(d.title || tag) + '.' + ext;
+  const file = folder_(tag).createFile(blob.setName(name));
+  const desc = [d.note, d.pageUrl].filter(Boolean).join('\n');
+  if (desc) file.setDescription(desc.slice(0, 4000));
+  const id = log_(tag, d, file, by, status || 'new');
+  return { ok: true, id: id, file: file.getUrl(), tag: tag };
+}
+
+/** A card with no image (link or text), e.g. a digest item. */
+function saveCard_(d, by, status) {
+  const id = newId_();
+  board_().appendRow([new Date(), '', safe_(clean_(d.tag || 'Other')), safe_(d.title || ''), safe_(d.note || ''),
+    safe_(d.pageUrl || ''), '', by, '', id, status || 'new', '', '',
+    safe_((d.tags || []).join(', ')), '[]', d.pageUrl ? 'link' : 'text', '']);
+  return { ok: true, id: id };
+}
+
+function log_(tag, d, file, by, status) {
+  const sh = board_();
+  const url = d.imageUrl && /^https?:\/\//.test(d.imageUrl) ? d.imageUrl : '';
+  const preview = url ? '=IMAGE("' + url.replace(/"/g, '%22') + '")' : '';
+  const id = newId_();
+  sh.appendRow([new Date(), preview, safe_(tag), safe_(d.title || ''), safe_(d.note || ''),
+    safe_(d.pageUrl || ''), file.getUrl(), by, safe_(url), id, status || 'new',
+    d.x == null ? '' : Math.round(d.x), d.y == null ? '' : Math.round(d.y),
+    safe_((d.tags || []).join(', ')), '[]', 'image', file.getId()]);
+  sh.setRowHeight(sh.getLastRow(), 110);
+  return id;
+}
+
+function fail_(url, error) {
+  failed_().appendRow([new Date(), safe_(url || ''), safe_(error || '')]);
+}
+
+/* ---------- helpers ---------- */
+
+function board_() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sh = ss.getSheetByName(BOARD);
+  if (!sh) sh = ss.insertSheet(BOARD);
+  if (sh.getLastRow() === 0) {
+    sh.appendRow(COLS);
+    sh.setFrozenRows(1);
+    sh.getRange(1, 1, 1, COLS.length).setFontWeight('bold');
+    sh.setColumnWidth(2, 150);
+  }
+  return sh;
+}
+
+function groups_() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sh = ss.getSheetByName(GROUPS);
+  if (!sh) {
+    sh = ss.insertSheet(GROUPS);
+    sh.appendRow(GROUP_COLS);
+    sh.setFrozenRows(1);
+  }
+  return sh;
+}
+
+function failed_() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sh = ss.getSheetByName(FAILED);
+  if (!sh) {
+    sh = ss.insertSheet(FAILED);
+    sh.appendRow(['When', 'Image URL', 'Problem']);
+    sh.setFrozenRows(1);
+  }
+  return sh;
+}
+
+const folderCache_ = {};
+function folder_(tag) {
+  if (!folderCache_[tag]) folderCache_[tag] = subfolder_(DriveApp.getFolderById(REFS_ID), tag);
+  return folderCache_[tag];
+}
+
+function subfolder_(parent, name) {
+  const it = parent.getFoldersByName(name);
+  return it.hasNext() ? it.next() : parent.createFolder(name);
+}
+
+function newId_() {
+  return Utilities.getUuid().replace(/-/g, '').slice(0, 12);
+}
+
+function clean_(s) {
+  return String(s).replace(/[\/\\:*?"<>|,]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 40) || 'Other';
+}
+
+function slug_(s) {
+  return String(s).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 50) || 'ref';
+}
+
+function safe_(s) {
+  s = String(s);
+  return /^[=+\-@]/.test(s) ? "'" + s : s;
+}
+
+function now_() {
+  return Utilities.formatDate(new Date(), TZ, 'yyyy-MM-dd HH:mm');
+}
+
+function json_(o) {
+  return ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON);
+}
