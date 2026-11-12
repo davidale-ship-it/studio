@@ -19,7 +19,7 @@ const FAILED = 'Failed';
 const GROUPS = 'Groups';
 const COLS = ['Added', 'Preview', 'Tag', 'Title', 'Note', 'Source page', 'Drive file', 'Added by', 'Image URL',
   'ID', 'Status', 'X', 'Y', 'Tags', 'Comments', 'Kind', 'FileId'];
-const GROUP_COLS = ['ID', 'Name', 'Members', 'Color', 'Created'];
+const GROUP_COLS = ['ID', 'Name', 'Members', 'Color', 'Created', 'X', 'Y'];
 const MAX_FILES_PER_RUN = 15;
 const TZ = 'Europe/Budapest';
 
@@ -112,6 +112,7 @@ function api_(d) {
       case 'positions': (d.moves || []).forEach(m => updateItem_(m.id, { x: m.x, y: m.y })); return { ok: true };
       case 'comment': return addComment_(d.id, d.text);
       case 'delete': return deleteItem_(d.id);
+      case 'deleteMany': return deleteMany_(d.ids || [], d.rejected || []);
       case 'note': return addNote_(d);
       case 'upload': return saveItem_(d, 'App', 'kept');
       case 'saveGroup': return saveGroup_(d.group);
@@ -207,6 +208,37 @@ function addNote_(d) {
   return { ok: true, id: id };
 }
 
+/** Delete many cards at once (left swipes). Rejected ones are noted in a tiny log, not in the sheet. */
+function deleteMany_(ids, rejected) {
+  const sh = board_();
+  const n = sh.getLastRow() - 1;
+  const want = new Set(ids.map(String));
+  if (n > 0 && want.size) {
+    const vals = sh.getRange(2, 1, n, COLS.length).getValues();
+    const rows = [];
+    vals.forEach((r, i) => { if (want.has(String(r[9]))) rows.push({ row: i + 2, fid: r[16] }); });
+    rows.sort((a, b) => b.row - a.row).forEach(x => {
+      if (isFileId_(x.fid)) { try { DriveApp.getFileById(x.fid).setTrashed(true); } catch (e) {} }
+      sh.deleteRow(x.row);
+    });
+    const groups = listGroups_();
+    groups.forEach(g => { const before = g.members.length; g.members = g.members.filter(m => !want.has(m)); if (g.members.length !== before) saveGroup_(g); });
+  }
+  if (rejected.length) logRejected_(rejected);
+  return { ok: true, deleted: want.size };
+}
+
+function logRejected_(list) {
+  const folder = DriveApp.getFolderById(SYSTEM_ID);
+  const it = folder.getFilesByName('Rejected log.txt');
+  const file = it.hasNext() ? it.next() : folder.createFile('Rejected log.txt', 'Things Dávid swiped left (not his taste). Read by the daily digest.\n', MimeType.PLAIN_TEXT);
+  const lines = list.map(r => [now_(), r.tag || '', r.title || '', r.note || '', r.pageUrl || ''].join(' | ').replace(/\n/g, ' '));
+  let text = file.getBlob().getDataAsString() + lines.join('\n') + '\n';
+  const all = text.split('\n');
+  if (all.length > 1500) text = all.slice(0, 1).concat(all.slice(-1200)).join('\n');   // keep it small
+  file.setContent(text);
+}
+
 function thumb_(fileId) {
   if (!fileId) return { ok: false, error: 'no file' };
   const f = DriveApp.getFileById(fileId);
@@ -228,7 +260,8 @@ function listGroups_() {
   return sh.getRange(2, 1, n, GROUP_COLS.length).getValues().filter(r => r[0]).map(r => {
     let members = [];
     try { members = JSON.parse(r[2] || '[]'); } catch (e) {}
-    return { id: String(r[0]), name: r[1], members: members, color: r[3] || '' };
+    return { id: String(r[0]), name: r[1], members: members, color: r[3] || '',
+      x: r[5] === '' ? null : Number(r[5]), y: r[6] === '' ? null : Number(r[6]) };
   });
 }
 
@@ -240,7 +273,8 @@ function saveGroup_(g) {
   const ids = n > 0 ? sh.getRange(2, 1, n, 1).getValues() : [];
   let row = 0;
   for (let i = 0; i < ids.length; i++) if (String(ids[i][0]) === g.id) row = i + 2;
-  const vals = [g.id, safe_(g.name || 'Group'), JSON.stringify(g.members || []), g.color || '', new Date()];
+  const vals = [g.id, safe_(g.name || 'Group'), JSON.stringify(g.members || []), g.color || '', new Date(),
+    g.x == null ? '' : Math.round(g.x), g.y == null ? '' : Math.round(g.y)];
   if (row) sh.getRange(row, 1, 1, vals.length).setValues([vals]); else sh.appendRow(vals);
   return { ok: true, id: g.id };
 }
@@ -433,7 +467,8 @@ function saveItem_(d, by, status) {
   }
 
   const type = (blob.getContentType() || '').toLowerCase();
-  if (type.indexOf('image/') !== 0) return { ok: false, error: 'not an image (' + type + ')' };
+  const isVideo = type.indexOf('video/') === 0;
+  if (type.indexOf('image/') !== 0 && !isVideo) return { ok: false, error: 'not an image or video (' + type + ')' };
 
   const ext = type.split('/')[1].split(/[+;]/)[0].replace('jpeg', 'jpg');
   const name = Utilities.formatDate(new Date(), TZ, 'yyyyMMdd-HHmmss') + '_' +
@@ -441,7 +476,7 @@ function saveItem_(d, by, status) {
   const file = folder_(tag).createFile(blob.setName(name));
   const desc = [d.note, d.pageUrl].filter(Boolean).join('\n');
   if (desc) file.setDescription(desc.slice(0, 4000));
-  const id = log_(tag, d, file, by, status || 'new');
+  const id = log_(tag, d, file, by, status || 'new', isVideo ? 'video' : 'image');
   return { ok: true, id: id, file: file.getUrl(), tag: tag };
 }
 
@@ -454,7 +489,7 @@ function saveCard_(d, by, status) {
   return { ok: true, id: id };
 }
 
-function log_(tag, d, file, by, status) {
+function log_(tag, d, file, by, status, kind) {
   const sh = board_();
   const url = d.imageUrl && /^https?:\/\//.test(d.imageUrl) ? d.imageUrl : '';
   const preview = url ? '=IMAGE("' + url.replace(/"/g, '%22') + '")' : '';
@@ -462,7 +497,7 @@ function log_(tag, d, file, by, status) {
   sh.appendRow([new Date(), preview, safe_(tag), safe_(d.title || ''), safe_(d.note || ''),
     safe_(d.pageUrl || ''), file.getUrl(), by, safe_(url), id, status || 'new',
     d.x == null ? '' : Math.round(d.x), d.y == null ? '' : Math.round(d.y),
-    safe_((d.tags || []).join(', ')), '[]', 'image', file.getId()]);
+    safe_((d.tags || []).join(', ')), '[]', kind || 'image', file.getId()]);
   sh.setRowHeight(sh.getLastRow(), 110);
   return id;
 }
@@ -493,6 +528,8 @@ function groups_() {
     sh = ss.insertSheet(GROUPS);
     sh.appendRow(GROUP_COLS);
     sh.setFrozenRows(1);
+  } else if (sh.getLastColumn() < GROUP_COLS.length) {
+    sh.getRange(1, 1, 1, GROUP_COLS.length).setValues([GROUP_COLS]);
   }
   return sh;
 }

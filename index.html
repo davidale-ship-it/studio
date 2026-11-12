@@ -73,7 +73,7 @@ input:focus,textarea:focus{border-color:var(--accent)}
              radial-gradient(1px 1px at 70% 80%,#ffffff18 50%,transparent 51%) 0 0/200px 200px,var(--bg)}
 #canvas.lasso{cursor:crosshair}
 #world{position:absolute;left:0;top:0;transform-origin:0 0;will-change:transform}
-#world.anim .node{transition:left .7s cubic-bezier(.2,.8,.2,1),top .7s cubic-bezier(.2,.8,.2,1)}
+.flow .node,.flow .glabel{transition:left .95s cubic-bezier(.2,1.28,.35,1),top .95s cubic-bezier(.2,1.28,.35,1);transition-delay:var(--sd,0ms)}
 .node{position:absolute;transform:translate(-50%,-50%);touch-action:none;user-select:none}
 .node .fl{animation:drift var(--d,9s) ease-in-out var(--dl,0s) infinite alternate}
 @keyframes drift{from{transform:translate(0,0) rotate(var(--r0,-.6deg))}to{transform:translate(var(--dx,6px),var(--dy,-8px)) rotate(var(--r1,.6deg))}}
@@ -90,8 +90,13 @@ input:focus,textarea:focus{border-color:var(--accent)}
 .node.sel .cc{outline:3px solid var(--accent);outline-offset:3px}
 .far .cc .t{display:none}
 .far .cc{width:120px}
-.group{position:absolute;border:2px dashed;border-radius:28px;pointer-events:none}
-.group .gl{position:absolute;left:18px;top:-14px;padding:3px 12px;border-radius:999px;font-size:13px;font-weight:600;pointer-events:auto;cursor:pointer;color:#1b1b1f}
+.glabel{position:absolute;transform:translate(-50%,-50%);z-index:100000;display:flex;align-items:center;gap:4px;padding:7px 8px 7px 16px;border-radius:999px;font-size:15px;font-weight:650;color:#1b1b1f;cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none;box-shadow:0 6px 20px rgba(0,0,0,.45);white-space:nowrap}
+.glabel .gm{width:26px;height:26px;border-radius:50%;background:rgba(0,0,0,.14);font-size:15px;line-height:1;color:#1b1b1f}
+.node.ing .cc{box-shadow:0 0 0 3px var(--gc),0 10px 28px rgba(0,0,0,.45)}
+.cc{position:relative}
+.play{position:absolute;left:50%;top:42%;transform:translate(-50%,-50%);width:46px;height:46px;border-radius:50%;background:rgba(0,0,0,.6);color:#fff;display:grid;place-items:center;font-size:17px;pointer-events:none}
+.sc .img .play{top:50%}
+img.noimg{visibility:hidden}
 #lassoSvg{position:fixed;inset:0;pointer-events:none;z-index:6}
 #lassoSvg path{fill:rgba(240,153,123,.12);stroke:var(--accent);stroke-width:2;stroke-dasharray:6 5}
 #canvasBtns{position:fixed;right:12px;bottom:calc(var(--safeB) + 16px);display:flex;flex-direction:column;gap:10px;z-index:8}
@@ -173,8 +178,7 @@ input:focus,textarea:focus{border-color:var(--accent)}
 <aside id="side">
   <h4>Tags</h4><div id="tagList"></div>
   <h4>Groups</h4><div id="groupList"></div>
-  <h4>Tidy up</h4>
-  <button class="row" id="rejBtn">Not-my-taste pile <span class="n" id="rejN"></span></button>
+  <h4>App</h4>
   <button class="row" id="settingsBtn">Settings</button>
 </aside>
 
@@ -216,11 +220,11 @@ input:focus,textarea:focus{border-color:var(--accent)}
   <button class="close" data-close>✕</button>
   <h2>Add to canvas</h2>
   <div class="btns">
-    <button class="pill" id="addPhoto">Photo</button>
+    <button class="pill" id="addPhoto">Photo or video</button>
     <button class="pill" id="addNote">Note</button>
     <button class="pill" id="addLink">Link</button>
   </div>
-  <input type="file" id="fileIn" accept="image/*" multiple class="hidden">
+  <input type="file" id="fileIn" accept="image/*,video/*" multiple class="hidden">
   <div id="addForm" class="hidden">
     <label id="aTitleL">Title</label><input id="aTitle">
     <div id="aUrlWrap"><label>Link</label><input id="aUrl" placeholder="https://"></div>
@@ -242,7 +246,7 @@ const S = {
   url: LS.get('studio.url') || '', key: LS.get('studio.key') || '',
   items: [], groups: [], mode: LS.get('studio.mode') || 'swipe',
   s: Number(LS.get('studio.s')) || 0.8, tx: Number(LS.get('studio.tx')) || 0, ty: Number(LS.get('studio.ty')) || 0,
-  lasso: false, sel: new Set(), thumbs: new Map(), busy: 0, pre: new Set(), lastWrite: 0
+  lasso: false, sel: new Set(), thumbs: new Map(), busy: 0, pre: new Set(), lastWrite: 0, tomb: new Set(), queue: [], flushing: false, z: 10, lastTap: null
 };
 const PALETTE = ['#f0997b', '#5dcaa5', '#afa9ec', '#fac775', '#ed93b1', '#85b7eb', '#97c459'];
 
@@ -266,6 +270,33 @@ function toast(msg, ms = 2200) {
   clearTimeout(toast.h); toast.h = setTimeout(() => { t.style.opacity = 0; setTimeout(() => t.classList.add('hidden'), 300); }, ms);
 }
 const fail = e => toast('Problem: ' + (e && e.message || e));
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+// background write queue: the app never waits for Google; writes go out one by one, deletes in batches
+function enqueue(action, data) { S.queue.push({ action, data }); S.lastWrite = Date.now(); flush(); }
+async function flush() {
+  if (S.flushing) return; S.flushing = true;
+  try {
+    while (S.queue.length) {
+      let job;
+      if (S.queue[0].action === 'deleteMany') {
+        const ids = [], rejected = [];
+        while (S.queue.length && S.queue[0].action === 'deleteMany') { const q = S.queue.shift(); ids.push(...q.data.ids); rejected.push(...(q.data.rejected || [])); }
+        job = { action: 'deleteMany', data: { ids, rejected } };
+      } else job = S.queue.shift();
+      for (let k = 0; k < 3; k++) {
+        try { await api(job.action, job.data); break; }
+        catch (e) { if (k === 2) fail(e); else await sleep(1500 * (k + 1)); }
+      }
+      S.lastWrite = Date.now();
+    }
+  } finally { S.flushing = false; }
+}
+function dropItem(it, rejected) {
+  S.tomb.add(it.id);
+  S.items = S.items.filter(i => i.id !== it.id);
+  S.groups.forEach(g => g.members = g.members.filter(m => m !== it.id));
+  enqueue('deleteMany', { ids: [it.id], rejected: rejected ? [{ title: it.title, tag: it.tag, note: it.note, pageUrl: it.pageUrl }] : [] });
+}
 
 async function load(quiet) {
   if (!S.url || !S.key) return;
@@ -273,7 +304,9 @@ async function load(quiet) {
     const j = await api('list');
     const prevIds = new Set(S.items.map(i => i.id));
     if (Date.now() - S.lastWrite < 4000) { const local = new Map(S.items.map(i => [i.id, i])); j.items.forEach(i => { const l = local.get(i.id); if (l) { i.status = l.status; i.x = l.x; i.y = l.y; } }); }
+    j.items = j.items.filter(i => !S.tomb.has(i.id));
     S.items = j.items; S.groups = j.groups;
+    S.items.filter(i => i.status === 'rejected').forEach(i => dropItem(i, true));   // left swipes never stay in the sheet
     const fresh = S.items.filter(i => !prevIds.has(i.id) && i.status === 'new').length;
     placeMissing();
     render();
@@ -283,7 +316,18 @@ async function load(quiet) {
 }
 
 /* ---------------- images ---------------- */
+function ytId(u) { const m = String(u || '').match(/(?:youtu\.be\/|[?&]v=|shorts\/)([\w-]{11})/); return m && m[1]; }
+const isVideoLink = u => /instagram\.com\/(reel|reels|tv)\/|tiktok\.com\/|youtu\.?be|vimeo\.com\//i.test(u || '');
+function visualOf(it) {
+  const yt = ytId(it.pageUrl);
+  if (it.kind === 'video') return { img: !!it.fileId, play: true };
+  if (it.kind === 'image' && (it.imageUrl || it.fileId)) return { img: true, play: isVideoLink(it.pageUrl) };
+  if (yt) return { img: true, src: 'https://img.youtube.com/vi/' + yt + '/hqdefault.jpg', play: true };
+  return { img: false, play: isVideoLink(it.pageUrl) };
+}
 function imgSrcFor(it, el) {
+  const v = visualOf(it);
+  if (v.src) { el.src = v.src; return; }
   if (it.imageUrl) {
     el.src = it.imageUrl;
     el.onerror = () => { el.onerror = null; if (it.fileId) thumb(it, el); };
@@ -295,9 +339,9 @@ async function thumb(it, el) {
     const j = await api('thumb', { fileId: it.fileId });
     const src = 'data:' + j.mime + ';base64,' + j.data;
     S.thumbs.set(it.fileId, src); el.src = src;
-  } catch (e) {}
+  } catch (e) { el.classList.add('noimg'); }
 }
-const hasImage = it => it.kind === 'image' && (it.imageUrl || it.fileId);
+const hasImage = it => visualOf(it).img;
 const allTags = it => [...new Set([it.tag, ...(it.tags || [])].filter(Boolean).map(String))];
 const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
@@ -327,7 +371,7 @@ function renderDeck() {
     let c = deck.querySelector('.sc[data-id="' + it.id + '"]:not(.gone)');
     if (!c) {
       c = document.createElement('div'); c.className = 'sc' + (hasImage(it) ? '' : ' textonly'); c.dataset.id = it.id;
-      c.innerHTML = '<div class="img"><img alt="" draggable="false"></div><div class="txt"><h3>' + esc(it.title || it.tag || 'Untitled') + '</h3><p>' +
+      c.innerHTML = '<div class="img"><img alt="" draggable="false">' + (visualOf(it).play ? '<div class="play">▶</div>' : '') + '</div><div class="txt"><h3>' + esc(it.title || it.tag || 'Untitled') + '</h3><p>' +
         esc(it.note || '') + '</p><div class="chips">' + allTags(it).map(t => '<span class="chip">' + esc(t) + '</span>').join('') +
         (it.pageUrl ? '<a class="chip" href="' + esc(it.pageUrl) + '" target="_blank" rel="noopener">source ↗</a>' : '') +
         '</div></div><div class="stamp yes">KEEP</div><div class="stamp no">NOPE</div>';
@@ -383,13 +427,14 @@ function decide(it, yes, c) {
     c.style.opacity = 0.2;
     setTimeout(() => c.remove(), 320);
   }
-  it.status = yes ? 'kept' : 'rejected';
-  const patch = { status: it.status };
-  if (yes && it.x == null) { const p = freeSpot(); it.x = p.x; it.y = p.y; patch.x = p.x; patch.y = p.y; }
+  if (yes) {
+    it.status = 'kept';
+    const patch = { status: 'kept' };
+    if (it.x == null) { const p = freeSpot(); it.x = p.x; it.y = p.y; patch.x = p.x; patch.y = p.y; }
+    enqueue('update', { id: it.id, patch });
+  } else dropItem(it, true);   // gone from the sheet and Drive, in the background
   renderDeck();            // next card is ready immediately
   renderSide();
-  S.lastWrite = Date.now();
-  api('update', { id: it.id, patch }).catch(fail);
 }
 addEventListener('keydown', e => {
   if (S.mode !== 'swipe' || e.target.matches('input,textarea') || $$('.sheet').some(x => !x.classList.contains('hidden'))) return;
@@ -413,6 +458,10 @@ function applyCam(save) {
   if (save) { LS.set('studio.s', S.s); LS.set('studio.tx', S.tx); LS.set('studio.ty', S.ty); }
 }
 const canvasItems = () => S.items.filter(i => i.status === 'kept');
+const itemById = id => S.items.find(i => i.id === id);
+const nodeEl = id => world.querySelector('.node[data-id="' + id + '"]');
+const groupOf = id => S.groups.find(g => g.members.includes(id));
+const gColor = g => g.color || PALETTE[Math.max(0, S.groups.indexOf(g)) % PALETTE.length];
 function hash(str) { let h = 0; for (const ch of String(str)) h = (h * 31 + ch.charCodeAt(0)) | 0; return Math.abs(h); }
 function freeSpot() {
   const c = screenToWorld(innerWidth / 2, innerHeight / 2);
@@ -420,16 +469,16 @@ function freeSpot() {
   return { x: Math.round(c.x + Math.cos(a) * r), y: Math.round(c.y + Math.sin(a) * r) };
 }
 function placeMissing() {
-  const moves = [];
-  canvasItems().forEach(it => { if (it.x == null || it.y == null || isNaN(it.x)) { const p = freeSpot(); it.x = p.x; it.y = p.y; moves.push({ id: it.id, x: p.x, y: p.y }); } });
-  if (moves.length) api('positions', { moves }).catch(() => {});
+  const moved = [];
+  canvasItems().forEach(it => { if (it.x == null || it.y == null || isNaN(it.x)) { const p = freeSpot(); it.x = p.x; it.y = p.y; moved.push(it); } });
+  moved.forEach(queueMove);
 }
 function renderCanvas() {
   applyCam();
   const items = canvasItems(), keep = new Set(items.map(i => i.id));
   $$('#world .node').forEach(n => { if (!keep.has(n.dataset.id)) n.remove(); });
   items.forEach(it => {
-    let n = world.querySelector('.node[data-id="' + it.id + '"]');
+    let n = nodeEl(it.id);
     if (!n) {
       n = document.createElement('div'); n.className = 'node'; n.dataset.id = it.id;
       const h = hash(it.id);
@@ -438,41 +487,43 @@ function renderCanvas() {
       n.style.setProperty('--r0', (-(h % 10) / 10) + 'deg'); n.style.setProperty('--r1', ((h % 7) / 10) + 'deg');
       world.appendChild(n);
     }
-    const ncom = (it.comments || []).length;
-    const sig = [it.title, it.note, it.imageUrl, it.fileId, ncom, allTags(it).join()].join('|');
+    const v = visualOf(it), ncom = (it.comments || []).length;
+    const sig = [it.title, it.note, it.imageUrl, it.fileId, it.kind, ncom, allTags(it).join()].join('|');
     if (n.dataset.sig !== sig) {
       n.dataset.sig = sig;
-      const img = hasImage(it);
-      n.innerHTML = '<div class="fl"><div class="cc' + (img ? '' : ' text') + '">' + (img ? '<img alt="">' : '') +
-        '<div class="t"><b>' + esc(it.title || (img ? '' : 'Note')) + '</b><span>' + esc(img ? allTags(it).join(' · ') : (it.note || '')) + '</span></div>' +
+      n.innerHTML = '<div class="fl"><div class="cc' + (v.img ? '' : ' text') + '">' + (v.img ? '<img alt="" draggable="false">' : '') +
+        (v.play ? '<div class="play">▶</div>' : '') +
+        '<div class="t"><b>' + esc(it.title || (v.img ? '' : 'Note')) + '</b><span>' + esc(v.img ? allTags(it).join(' · ') : (it.note || '')) + '</span></div>' +
         (ncom ? '<div class="dot">' + ncom + '</div>' : '') + '</div></div>';
-      if (img) imgSrcFor(it, n.querySelector('img'));
+      if (v.img) imgSrcFor(it, n.querySelector('img'));
     }
+    const g = groupOf(it.id);
+    n.classList.toggle('ing', !!g);
+    n.style.setProperty('--gc', g ? gColor(g) : 'transparent');
     n.style.left = it.x + 'px'; n.style.top = it.y + 'px';
     n.classList.toggle('sel', S.sel.has(it.id));
   });
   layoutGroups();
 }
-function nodeBox(id) {
-  const it = S.items.find(i => i.id === id), n = world.querySelector('.node[data-id="' + id + '"]');
-  if (!it || !n) return null;
-  const w = n.offsetWidth || 180, h = n.offsetHeight || 200;
-  return { l: it.x - w / 2, t: it.y - h / 2, r: it.x + w / 2, b: it.y + h / 2 };
+function centroid(ids) {
+  const its = ids.map(itemById).filter(i => i && i.status === 'kept' && i.x != null);
+  if (!its.length) return null;
+  return { x: its.reduce((a, i) => a + i.x, 0) / its.length, y: its.reduce((a, i) => a + i.y, 0) / its.length };
 }
 function layoutGroups() {
   const live = new Set(S.groups.map(g => g.id));
-  $$('#world .group').forEach(g => { if (!live.has(g.dataset.id)) g.remove(); });
-  S.groups.forEach((g, i) => {
-    const boxes = g.members.map(nodeBox).filter(Boolean);
-    let el = world.querySelector('.group[data-id="' + g.id + '"]');
-    if (!boxes.length) { if (el) el.remove(); return; }
-    if (!el) { el = document.createElement('div'); el.className = 'group'; el.dataset.id = g.id; el.innerHTML = '<span class="gl"></span>'; world.insertBefore(el, world.firstChild);
+  $$('#world .glabel').forEach(el => { if (!live.has(el.dataset.id)) el.remove(); });
+  S.groups.forEach(g => {
+    if (g.x == null || g.y == null || isNaN(g.x)) { const c = centroid(g.members); if (!c) return; g.x = Math.round(c.x); g.y = Math.round(c.y); }
+    let el = world.querySelector('.glabel[data-id="' + g.id + '"]');
+    if (!el) {
+      el = document.createElement('div'); el.className = 'glabel'; el.dataset.id = g.id;
+      el.innerHTML = '<span class="gn"></span><button class="gm" aria-label="Group options">⋯</button>';
+      world.appendChild(el);
     }
-    const col = g.color || PALETTE[i % PALETTE.length], pad = 34;
-    const l = Math.min(...boxes.map(b => b.l)) - pad, t = Math.min(...boxes.map(b => b.t)) - pad;
-    const r = Math.max(...boxes.map(b => b.r)) + pad, b = Math.max(...boxes.map(b => b.b)) + pad;
-    Object.assign(el.style, { left: l + 'px', top: t + 'px', width: (r - l) + 'px', height: (b - t) + 'px', borderColor: col, background: col + '10' });
-    const gl = el.querySelector('.gl'); gl.textContent = g.name; gl.style.background = col;
+    el.querySelector('.gn').textContent = g.name + ' · ' + g.members.filter(m => { const i = itemById(m); return i && i.status === 'kept'; }).length;
+    el.style.background = gColor(g);
+    el.style.left = g.x + 'px'; el.style.top = g.y + 'px';
   });
 }
 const screenToWorld = (x, y) => ({ x: (x - S.tx) / S.s, y: (y - S.ty) / S.s });
@@ -493,25 +544,75 @@ $('#fitBtn').onclick = fitAll;
 $('#zinBtn').onclick = () => zoomAt(innerWidth / 2, innerHeight / 2, 1.25);
 $('#zoutBtn').onclick = () => zoomAt(innerWidth / 2, innerHeight / 2, 0.8);
 
-// pointer handling: drag cards, pan, pinch, lasso
+/* packing: cards settle around a centre, as close as possible without covering each other (a little overlap is ok) */
+function packAround(its, cx, cy, centreW, centreH) {
+  const placed = [{ x: cx, y: cy, w: centreW || 40, h: centreH || 40 }], out = [];
+  its.forEach(it => {
+    const n = nodeEl(it.id);
+    const w = (n ? n.offsetWidth : 180) - 8, h = (n ? n.offsetHeight : 200) - 8;
+    let spot = null;
+    for (let t = 0; t < 6000 && !spot; t++) {
+      const a = t * 0.3, r = 30 + 7 * a;
+      const x = cx + Math.cos(a) * r * 1.3, y = cy + Math.sin(a) * r * 0.85;
+      if (placed.every(p => Math.abs(p.x - x) * 2 >= p.w + w || Math.abs(p.y - y) * 2 >= p.h + h)) spot = { x, y };
+    }
+    spot = spot || { x: cx, y: cy };
+    placed.push({ x: spot.x, y: spot.y, w, h }); out.push(spot);
+  });
+  return out;
+}
+function flowTo(ids, cx, cy, labelEl) {
+  if (S.mode !== 'canvas') setMode('canvas');
+  const its = ids.map(itemById).filter(i => i && i.status === 'kept');
+  if (!its.length) { toast('Nothing on the canvas with that yet'); return; }
+  its.forEach(i => { if (i.x == null) { i.x = cx; i.y = cy; } });
+  // biggest first so the cluster stays round; cards closest to the centre keep their place
+  its.sort((a, b) => ((nodeEl(b.id) || {}).offsetHeight || 0) - ((nodeEl(a.id) || {}).offsetHeight || 0));
+  const lab = labelEl ? labelEl.getBoundingClientRect() : null;
+  const pos = packAround(its, cx, cy, lab ? lab.width / S.s + 24 : 40, lab ? lab.height / S.s + 16 : 40);
+  world.classList.add('flow');
+  its.forEach((it, k) => {
+    const n = nodeEl(it.id); if (n) n.style.setProperty('--sd', (k * 30) + 'ms');
+    it.x = Math.round(pos[k].x); it.y = Math.round(pos[k].y); queueMove(it);
+  });
+  renderCanvas();
+  clearTimeout(flowTo.t);
+  flowTo.t = setTimeout(() => { world.classList.remove('flow'); $$('#world .node').forEach(n => n.style.removeProperty('--sd')); }, 1100 + its.length * 30);
+}
+function gather(ids) {
+  const c = screenToWorld(innerWidth / 2, innerHeight / 2 + 20);
+  flowTo(ids, c.x, c.y);
+  S.sel = new Set(ids); renderCanvas();
+}
+
+/* pointer handling: drag cards, drag group labels, pan, pinch, lasso */
 const ptrs = new Map(); let act = null, saveTimer = null; const pendingMoves = new Map();
 function queueMove(it) {
-  pendingMoves.set(it.id, { id: it.id, x: it.x, y: it.y });
+  pendingMoves.set(it.id, { id: it.id, x: Math.round(it.x), y: Math.round(it.y) });
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => { const moves = [...pendingMoves.values()]; pendingMoves.clear(); api('positions', { moves }).catch(fail); }, 700);
+  saveTimer = setTimeout(() => { const moves = [...pendingMoves.values()]; pendingMoves.clear(); if (moves.length) enqueue('positions', { moves }); }, 600);
 }
+function front(n) { if (n) n.style.zIndex = ++S.z; }
 cvs.addEventListener('pointerdown', e => {
-  cvs.setPointerCapture(e.pointerId);
+  if (e.target.closest('.gm')) { const el = e.target.closest('.glabel'); openGroup(el.dataset.id); return; }
+  try { cvs.setPointerCapture(e.pointerId); } catch (err) {}
   ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
   if (ptrs.size === 2) { const [a, b] = [...ptrs.values()]; act = { type: 'pinch', d: Math.hypot(a.x - b.x, a.y - b.y) }; return; }
-  const gl = e.target.closest('.gl');
-  if (gl && !S.lasso) { ptrs.delete(e.pointerId); openGroup(gl.parentNode.dataset.id); return; }
   if (S.lasso) { act = { type: 'lasso', pts: [[e.clientX, e.clientY]] }; $('#lassoSvg').classList.remove('hidden'); return; }
+  const gl = e.target.closest('.glabel');
+  if (gl) {
+    const g = S.groups.find(x => x.id === gl.dataset.id); if (!g) return;
+    const mem = g.members.map(itemById).filter(i => i && i.status === 'kept');
+    mem.forEach(i => front(nodeEl(i.id)));
+    act = { type: 'group', g, el: gl, sx: e.clientX, sy: e.clientY, gx: g.x, gy: g.y, mem, start: mem.map(i => ({ x: i.x, y: i.y })), moved: false };
+    return;
+  }
   const node = e.target.closest('.node');
   if (node) {
-    const it = S.items.find(i => i.id === node.dataset.id);
+    const it = itemById(node.dataset.id);
+    front(node);
     const ids = S.sel.has(it.id) ? [...S.sel] : [it.id];
-    act = { type: 'card', it, node, ids, sx: e.clientX, sy: e.clientY, start: ids.map(id => { const x = S.items.find(i => i.id === id); return { x: x.x, y: x.y }; }), moved: false };
+    act = { type: 'card', it, node, ids, sx: e.clientX, sy: e.clientY, start: ids.map(id => { const x = itemById(id); return { x: x.x, y: x.y }; }), moved: false };
     node.classList.add('drag');
   } else act = { type: 'pan', sx: e.clientX, sy: e.clientY, tx: S.tx, ty: S.ty, moved: false };
 });
@@ -528,9 +629,14 @@ cvs.addEventListener('pointermove', e => {
   if (Math.abs(dx) + Math.abs(dy) > 5) act.moved = true;
   if (act.type === 'pan') { S.tx = act.tx + dx; S.ty = act.ty + dy; applyCam(); cvs.style.cursor = 'grabbing'; }
   if (act.type === 'card' && act.moved) {
-    act.ids.forEach((id, k) => { const it = S.items.find(i => i.id === id); it.x = act.start[k].x + dx / S.s; it.y = act.start[k].y + dy / S.s;
-      const n = world.querySelector('.node[data-id="' + id + '"]'); if (n) { n.style.left = it.x + 'px'; n.style.top = it.y + 'px'; } });
-    layoutGroups();
+    act.ids.forEach((id, k) => { const it = itemById(id); it.x = act.start[k].x + dx / S.s; it.y = act.start[k].y + dy / S.s;
+      const n = nodeEl(id); if (n) { n.style.left = it.x + 'px'; n.style.top = it.y + 'px'; } });
+  }
+  if (act.type === 'group' && act.moved) {
+    act.g.x = act.gx + dx / S.s; act.g.y = act.gy + dy / S.s;
+    act.el.style.left = act.g.x + 'px'; act.el.style.top = act.g.y + 'px';
+    act.mem.forEach((it, k) => { it.x = act.start[k].x + dx / S.s; it.y = act.start[k].y + dy / S.s;
+      const n = nodeEl(it.id); if (n) { n.style.left = it.x + 'px'; n.style.top = it.y + 'px'; } });
   }
 });
 function endPtr(e) {
@@ -540,8 +646,14 @@ function endPtr(e) {
   if (act.type === 'pan') { applyCam(true); cvs.style.cursor = ''; if (!act.moved && S.sel.size) { S.sel.clear(); renderCanvas(); } }
   if (act.type === 'card') {
     act.node.classList.remove('drag');
-    if (act.moved) act.ids.forEach(id => queueMove(S.items.find(i => i.id === id)));
+    if (act.moved) act.ids.forEach(id => queueMove(itemById(id)));
     else openDetail(act.it);
+  }
+  if (act.type === 'group') {
+    const g = act.g;
+    if (act.moved) { act.mem.forEach(queueMove); g.x = Math.round(g.x); g.y = Math.round(g.y); enqueue('saveGroup', { group: g }); }
+    else if (S.lastTap && S.lastTap.id === g.id && Date.now() - S.lastTap.t < 420) { S.lastTap = null; flowTo(g.members, g.x, g.y, act.el); enqueue('saveGroup', { group: g }); }
+    else { S.lastTap = { id: g.id, t: Date.now() }; S.sel = new Set(act.mem.map(i => i.id)); renderCanvas(); }
   }
   if (act.type === 'lasso') finishLasso(act.pts);
   act = null;
@@ -584,70 +696,54 @@ function finishLasso(pts) {
   openNewGroup(hits);
 }
 function openNewGroup(ids) {
-  sheet('detail', '<h2>New group · ' + ids.length + ' cards</h2><label>Name</label><input id="gName" placeholder="e.g. Mirror faces">' +
-    '<label>Also tag them</label><input id="gTag" placeholder="optional tag">' +
+  sheet('detail', '<h2>New group · ' + ids.length + ' cards</h2><label>Label</label><input id="gName" placeholder="e.g. Mirror faces">' +
     '<div class="btns"><button class="pill accent" id="gSave">Make group</button><button class="pill" data-close>Cancel</button></div>');
   setTimeout(() => $('#gName').focus(), 50);
-  $('#gSave').onclick = async () => {
-    const name = $('#gName').value.trim() || 'Group', tag = $('#gTag').value.trim();
-    const g = { id: '', name, members: ids, color: PALETTE[S.groups.length % PALETTE.length] };
+  const go = async () => {
+    const name = $('#gName').value.trim() || 'Group';
+    const c = centroid(ids) || screenToWorld(innerWidth / 2, innerHeight / 2);
+    const g = { id: '', name, members: ids, color: PALETTE[S.groups.length % PALETTE.length], x: Math.round(c.x), y: Math.round(c.y) };
     closeSheets(); S.sel.clear();
-    try {
-      const r = await api('saveGroup', { group: g }); g.id = r.id; S.groups.push(g);
-      if (tag) for (const id of ids) { const it = S.items.find(i => i.id === id); it.tags = [...new Set([...(it.tags || []), tag])]; api('update', { id, patch: { tags: it.tags } }).catch(() => {}); }
-      render(); toast('Group "' + name + '" made');
-    } catch (e) { fail(e); }
+    try { const r = await api('saveGroup', { group: g }); g.id = r.id; S.groups.push(g); layoutGroups(); flowTo(ids, g.x, g.y, world.querySelector('.glabel[data-id="' + g.id + '"]')); renderSide(); toast('Group "' + name + '" made'); }
+    catch (e) { fail(e); }
   };
+  $('#gSave').onclick = go;
+  $('#gName').onkeydown = e => { if (e.key === 'Enter') go(); };
 }
 function openGroup(id) {
   const g = S.groups.find(x => x.id === id); if (!g) return;
-  sheet('detail', '<h2>' + esc(g.name) + '</h2><p class="muted">' + g.members.length + ' cards</p><label>Rename</label><input id="gName" value="' + esc(g.name) + '">' +
+  sheet('detail', '<h2>' + esc(g.name) + '</h2><p class="muted">' + g.members.length + ' cards · double-tap the label on the canvas to pull them around it</p>' +
+    '<label>Rename</label><input id="gName" value="' + esc(g.name) + '">' +
     '<div class="btns"><button class="pill accent" id="gRen">Save</button><button class="pill" id="gGather">Pull together</button>' +
     '<button class="pill" id="gAsk">Ask Claude about this group</button><button class="pill danger" id="gDel">Ungroup</button></div>');
-  $('#gRen').onclick = () => { g.name = $('#gName').value.trim() || g.name; api('saveGroup', { group: g }).catch(fail); closeSheets(); render(); };
-  $('#gGather').onclick = () => { closeSheets(); gather(g.members); };
+  $('#gRen').onclick = () => { g.name = $('#gName').value.trim() || g.name; enqueue('saveGroup', { group: g }); closeSheets(); render(); };
+  $('#gGather').onclick = () => { closeSheets(); flowTo(g.members, g.x, g.y, world.querySelector('.glabel[data-id="' + g.id + '"]')); };
   $('#gAsk').onclick = () => {
-    const its = g.members.map(m => S.items.find(i => i.id === m)).filter(Boolean);
-    openClaude('I grouped these references on my Studio canvas as "' + g.name + '". Tell me what connects them, what artwork could merge them, and find 15 more references in that direction (use my art-reference-hunt skill so they land in my swipe deck).\n\n' +
+    const its = g.members.map(itemById).filter(Boolean);
+    openClaude('I grouped these references on my Art Studio canvas as "' + g.name + '". Tell me what connects them, what artwork could merge them, and find 15 more references in that direction.\n\n' +
       its.map(i => '- ' + (i.title || i.tag) + ' ' + (i.imageUrl || i.driveUrl || i.pageUrl || '') + (i.note ? ' (' + i.note + ')' : '')).join('\n'));
   };
-  $('#gDel').onclick = () => { S.groups = S.groups.filter(x => x.id !== id); api('deleteGroup', { id }).catch(fail); closeSheets(); render(); };
-}
-// pull a set of cards close together at the centre of the view
-function gather(ids) {
-  if (S.mode !== 'canvas') setMode('canvas');
-  const c = screenToWorld(innerWidth / 2, innerHeight / 2 + 20);
-  const its = ids.map(id => S.items.find(i => i.id === id)).filter(i => i && i.status === 'kept');
-  if (!its.length) { toast('Nothing on the canvas with that yet'); return; }
-  world.classList.add('anim');
-  its.forEach((it, k) => { const a = k * 2.4, r = 60 * Math.sqrt(k + 0.6) + (k ? 90 : 0); it.x = Math.round(c.x + Math.cos(a) * r * 1.3); it.y = Math.round(c.y + Math.sin(a) * r); queueMove(it); });
-  renderCanvas();
-  setTimeout(() => { world.classList.remove('anim'); layoutGroups(); }, 750);
-  S.sel = new Set(its.map(i => i.id)); renderCanvas();
+  $('#gDel').onclick = () => { S.groups = S.groups.filter(x => x.id !== id); enqueue('deleteGroup', { id }); closeSheets(); render(); };
 }
 
 /* ---------------- side panel ---------------- */
 function renderSide() {
   const counts = {};
-  S.items.filter(i => i.status !== 'rejected').forEach(it => allTags(it).forEach(t => counts[t] = (counts[t] || 0) + 1));
+  S.items.filter(i => i.status === 'kept').forEach(it => allTags(it).forEach(t => counts[t] = (counts[t] || 0) + 1));
   const tags = Object.keys(counts).sort((a, b) => counts[b] - counts[a]);
   $('#tagList').innerHTML = tags.length ? tags.map((t, i) => '<button class="row" data-tag="' + esc(t) + '"><span class="sw" style="background:' + PALETTE[i % PALETTE.length] + '"></span>' + esc(t) + '<span class="n">' + counts[t] + '</span></button>').join('') : '<p class="muted" style="padding:0 10px">No tags yet</p>';
   $('#groupList').innerHTML = S.groups.length ? S.groups.map((g, i) => '<button class="row" data-group="' + esc(g.id) + '"><span class="sw" style="background:' + (g.color || PALETTE[i % PALETTE.length]) + '"></span>' + esc(g.name) + '<span class="n">' + g.members.length + '</span></button>').join('') : '<p class="muted" style="padding:0 10px">Circle cards on the canvas to make one</p>';
-  $('#rejN').textContent = S.items.filter(i => i.status === 'rejected').length || '';
   $$('#tagList [data-tag]').forEach(b => b.onclick = () => { closeSide(); gather(S.items.filter(i => allTags(i).includes(b.dataset.tag)).map(i => i.id)); toast(b.dataset.tag); });
-  $$('#groupList [data-group]').forEach(b => b.onclick = () => { closeSide(); const g = S.groups.find(x => x.id === b.dataset.group); if (g) gather(g.members); });
+  $$('#groupList [data-group]').forEach(b => b.onclick = () => {
+    closeSide(); const g = S.groups.find(x => x.id === b.dataset.group); if (!g) return;
+    if (S.mode !== 'canvas') setMode('canvas');
+    if (g.x != null) { S.tx = innerWidth / 2 - g.x * S.s; S.ty = innerHeight / 2 - g.y * S.s; applyCam(true); }
+    flowTo(g.members, g.x, g.y, world.querySelector('.glabel[data-id="' + g.id + '"]'));
+  });
 }
 const openSide = () => { $('#side').classList.add('open'); $('#scrim').classList.remove('hidden'); };
 const closeSide = () => { $('#side').classList.remove('open'); $('#scrim').classList.add('hidden'); };
 $('#menuBtn').onclick = openSide; $('#scrim').onclick = closeSide;
-$('#rejBtn').onclick = () => {
-  closeSide();
-  const rej = S.items.filter(i => i.status === 'rejected');
-  sheet('detail', '<h2>Not-my-taste pile</h2><p class="muted">' + rej.length + ' items you swiped left. They still teach your taste. Delete them to clear the files from Drive and the sheet.</p>' +
-    '<div class="btns"><button class="pill danger" id="rejAll">Delete all ' + rej.length + '</button><button class="pill" id="rejBack">Put back in deck</button></div>');
-  armDelete($('#rejAll'), async () => { closeSheets(); for (const it of rej) { S.items = S.items.filter(i => i.id !== it.id); try { await api('delete', { id: it.id }); } catch (e) {} } render(); toast('Deleted ' + rej.length); });
-  $('#rejBack').onclick = () => { rej.forEach(it => { it.status = 'new'; api('update', { id: it.id, patch: { status: 'new' } }).catch(() => {}); }); closeSheets(); render(); };
-};
 $('#settingsBtn').onclick = () => { closeSide(); showSetup(); };
 
 /* ---------------- sheets ---------------- */
@@ -665,22 +761,28 @@ function openDetail(it, focusComment, focusDelete) {
     '<h2>' + esc(it.title || it.tag || 'Untitled') + '</h2>' + (it.note ? '<p class="note">' + esc(it.note) + '</p>' : '') +
     '<label>Tags</label><input id="dTags" value="' + esc((it.tags || []).join(', ')) + '" placeholder="add tags, comma separated">' +
     (it.tag ? '<p class="muted" style="margin:6px 2px 0">Folder: ' + esc(it.tag) + '</p>' : '') +
+    (it.status === 'kept' && S.groups.length ? '<label>Groups</label><div class="btns" id="dGroups" style="margin-top:0">' + S.groups.map(g => '<button class="pill' + (g.members.includes(it.id) ? ' accent' : '') + '" data-g="' + esc(g.id) + '">' + esc(g.name) + '</button>').join('') + '</div>' : '') +
     '<label>Comments</label><div id="dCm">' + (it.comments || []).map(c => '<div class="cm"><small>' + fmt(c.t) + '</small>' + esc(c.text) + '</div>').join('') + '</div>' +
     '<textarea id="dNew" placeholder="What do you like about it? What could it become?"></textarea>' +
     '<div class="btns"><button class="pill accent" id="dSave">Save</button>' +
     '<button class="pill" id="dAnalyze">Analyze with Claude</button>' +
     (it.pageUrl ? '<a class="pill" href="' + esc(it.pageUrl) + '" target="_blank" rel="noopener">Source ↗</a>' : '') +
-    (it.driveUrl ? '<a class="pill" href="' + esc(it.driveUrl) + '" target="_blank" rel="noopener">Drive ↗</a>' : '') +
+    (it.driveUrl ? '<a class="pill" href="' + esc(it.driveUrl) + '" target="_blank" rel="noopener">' + (it.kind === 'video' ? '▶ Play' : 'Drive ↗') + '</a>' : '') +
     (it.status === 'kept' ? '<button class="pill" id="dBack">Back to deck</button>' : '') +
     '<button class="pill danger" id="dDel">Delete</button></div>');
   if (img) imgSrcFor(it, $('#dImg'));
+  $$('#dGroups [data-g]').forEach(b => b.onclick = () => {
+    const g = S.groups.find(x => x.id === b.dataset.g); if (!g) return;
+    if (g.members.includes(it.id)) g.members = g.members.filter(m => m !== it.id); else g.members.push(it.id);
+    b.classList.toggle('accent'); enqueue('saveGroup', { group: g }); render();
+  });
   if (focusComment) setTimeout(() => $('#dNew').focus(), 60);
   if (focusDelete) setTimeout(() => $('#dDel').click(), 60);
   $('#dSave').onclick = async () => {
     const tags = $('#dTags').value.split(',').map(s => s.trim()).filter(Boolean), txt = $('#dNew').value.trim();
     it.tags = tags; closeSheets(); render();
     try {
-      await api('update', { id: it.id, patch: { tags } });
+      enqueue('update', { id: it.id, patch: { tags } });
       if (txt) { const r = await api('comment', { id: it.id, text: txt }); it.comments = r.comments; render(); }
       toast('Saved');
     } catch (e) { fail(e); }
@@ -688,12 +790,10 @@ function openDetail(it, focusComment, focusDelete) {
   $('#dAnalyze').onclick = () => openClaude('Analyze this reference for my art practice (mixed-media sculptural portraits). What makes it work, which technique I could take from it, and how it fits what I have kept on my Studio board. Then find 10 related references with my art-reference-hunt skill.\n\n' +
     (it.title || '') + '\nImage: ' + (it.imageUrl || it.driveUrl || '') + (it.pageUrl ? '\nSource: ' + it.pageUrl : '') + (it.note ? '\nNote: ' + it.note : '') +
     ((it.comments || []).length ? '\nMy comments: ' + it.comments.map(c => c.text).join(' / ') : ''));
-  const back = $('#dBack'); if (back) back.onclick = () => { it.status = 'new'; api('update', { id: it.id, patch: { status: 'new' } }).catch(fail); closeSheets(); render(); };
-  armDelete($('#dDel'), async () => {
-    closeSheets(); S.items = S.items.filter(i => i.id !== it.id);
-    S.groups.forEach(g => g.members = g.members.filter(m => m !== it.id));
-    $$('[data-id="' + it.id + '"]').forEach(n => n.remove()); render();
-    try { await api('delete', { id: it.id }); toast('Deleted from Drive and sheet'); } catch (e) { fail(e); }
+  const back = $('#dBack'); if (back) back.onclick = () => { it.status = 'new'; enqueue('update', { id: it.id, patch: { status: 'new' } }); closeSheets(); render(); };
+  armDelete($('#dDel'), () => {
+    closeSheets(); dropItem(it, false);
+    $$('[data-id="' + it.id + '"]').forEach(n => n.remove()); render(); toast('Deleted');
   });
 }
 
@@ -738,14 +838,19 @@ $('#fileIn').onchange = async e => {
   const files = [...e.target.files]; e.target.value = ''; closeSheets();
   for (const f of files) {
     try {
-      toast('Uploading ' + f.name + '…', 4000);
-      const { data, mime } = await shrink(f);
+      const video = (f.type || '').indexOf('video/') === 0;
+      if (video && f.size > 30 * 1024 * 1024) { toast(f.name + ' is over 30 MB. Trim it or add the link instead.', 4500); continue; }
+      toast('Uploading ' + f.name + '…', 6000);
+      const { data, mime } = video ? await rawB64(f) : await shrink(f);
       const p = freeSpot();
-      await api('upload', { imageBase64: data, mimeType: mime, title: f.name.replace(/\.[^.]+$/, ''), tag: 'Uploads', x: p.x, y: p.y });
+      await api('upload', { imageBase64: data, mimeType: mime, title: f.name.replace(/\.[^.]+$/, ''), tag: video ? 'Videos' : 'Uploads', x: p.x, y: p.y });
     } catch (err) { fail(err); }
   }
   await load(); if (S.mode !== 'canvas') setMode('canvas'); toast('Uploaded');
 };
+function rawB64(file) {
+  return new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res({ data: String(r.result).split(',')[1], mime: file.type }); r.onerror = rej; r.readAsDataURL(file); });
+}
 async function shrink(file) {
   const bmp = await createImageBitmap(file);
   const k = Math.min(1, 1800 / Math.max(bmp.width, bmp.height));
