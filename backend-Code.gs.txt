@@ -5,7 +5,8 @@
  * Free, on Google's servers:
  *  1. API for the Studio app (swipe deck + canvas): doPost with {key, action, ...}.
  *  2. Receives images from the "Save to Art Studio" Chrome extension (doPost, no action).
- *  3. Every minute, reads batch files Claude drops in "00 Inbox" (refs-*.json).
+ *  3. Batch files Claude drops in "00 Inbox" (refs-*.json) become swipe cards at once
+ *     (whenever the app checks in, and every minute); images are copied to Drive after.
  *  4. Moves images shared from the phone into "00 Inbox" to References/Phone.
  * Every item is one row on the Board tab. Groups live on the Groups tab.
  */
@@ -100,7 +101,7 @@ function doGet() {
 
 function api_(d) {
   switch (d.action) {
-    case 'list': return { ok: true, items: listItems_(), groups: listGroups_(), time: Date.now() };
+    case 'list': { const added = ingest_(); return { ok: true, items: listItems_(), groups: listGroups_(), added: added, time: Date.now() }; }
     case 'thumb': return thumb_(d.fileId);
   }
   const lock = LockService.getScriptLock();
@@ -144,7 +145,8 @@ function rowToItem_(r) {
     tags: String(r[13] || '').split(',').map(s => s.trim()).filter(Boolean),
     comments: comments,
     kind: r[15] || 'image',
-    fileId: r[16] || ''
+    fileId: isFileId_(r[16]) ? r[16] : '',
+    pending: r[16] === 'pending'
   };
 }
 
@@ -187,7 +189,7 @@ function deleteItem_(id) {
   if (!row) return { ok: false, error: 'not found' };
   const sh = board_();
   const fileId = sh.getRange(row, 17).getValue();
-  if (fileId) { try { DriveApp.getFileById(fileId).setTrashed(true); } catch (e) {} }
+  if (isFileId_(fileId)) { try { DriveApp.getFileById(fileId).setTrashed(true); } catch (e) {} }
   sh.deleteRow(row);
   // drop it from any group
   listGroups_().forEach(g => {
@@ -254,45 +256,156 @@ function deleteGroup_(id) {
 
 /* ---------- inbox robot (every minute) ---------- */
 
+/** Trigger entry: show new finds first, then save their images to Drive. */
 function processInbox() {
+  ingest_();
+  downloadPending_();
+}
+
+/** Phase 1 (fast, seconds): turn every batch file into swipe cards right away. */
+function ingest_() {
   const lock = LockService.getScriptLock();
-  if (!lock.tryLock(1000)) return;
+  if (!lock.tryLock(500)) return 0;
+  let added = 0;
   try {
-    const inbox = DriveApp.getFolderById(INBOX_ID);
-    const files = inbox.getFiles();
-    if (!files.hasNext()) return;
+    const files = DriveApp.getFolderById(INBOX_ID).getFiles();
+    if (!files.hasNext()) return 0;
     const doneFolder = subfolder_(DriveApp.getFolderById(SYSTEM_ID), 'Processed batches');
-    let handled = 0;
-    while (files.hasNext() && handled < MAX_FILES_PER_RUN) {
+    const seen = seenKeys_();
+    const rows = [];
+    while (files.hasNext()) {
       const f = files.next();
       const name = f.getName();
       const type = f.getMimeType();
-
       if (/^refs-.*\.json$/i.test(name)) {
         let batch;
         try { batch = JSON.parse(f.getBlob().getDataAsString()); }
-        catch (err) { fail_('', 'Bad batch file ' + name + ': ' + err); f.moveTo(doneFolder); handled++; continue; }
+        catch (err) { fail_('', 'Bad batch file ' + name + ': ' + err); f.moveTo(doneFolder); continue; }
         const items = Array.isArray(batch) ? batch : (batch.items || []);
-        let ok = 0;
+        let n = 0;
         items.forEach(it => {
+          if (!it || (!it.imageUrl && !it.title && !it.pageUrl && !it.note)) return;
           if (!it.tag && batch.topic) it.tag = batch.topic;
-          try {
-            const r = (it.imageUrl || it.imageBase64) ? saveItem_(it, 'Claude', 'new') : saveCard_(it, 'Claude', 'new');
-            if (r.ok) ok++; else fail_(it.imageUrl || it.pageUrl, r.error);
-          } catch (err) { fail_(it.imageUrl || it.pageUrl, String(err)); }
+          const k = itemKey_(it.imageUrl, it.title, it.pageUrl);
+          if (seen.has(k)) return;
+          seen.add(k);
+          rows.push(cardRow_(it, 'Claude', 'new'));
+          n++;
         });
-        f.setDescription('Saved ' + ok + ' of ' + items.length + ' on ' + now_());
+        f.setDescription('Queued ' + n + ' of ' + items.length + ' on ' + now_());
         f.moveTo(doneFolder);
-        handled++;
+        added += n;
       } else if (type.indexOf('image/') === 0) {
         f.moveTo(folder_('Phone'));
-        log_('Phone', { title: name }, f, 'Phone', 'kept');
-        handled++;
+        rows.push([new Date(), '', 'Phone', safe_(name), '', '', f.getUrl(), 'Phone', '', newId_(), 'kept', '', '', '', '[]', 'image', f.getId()]);
+        added++;
       }
+    }
+    if (rows.length) {
+      const sh = board_();
+      sh.getRange(sh.getLastRow() + 1, 1, rows.length, COLS.length).setValues(rows);
     }
   } finally {
     lock.releaseLock();
   }
+  return added;
+}
+
+/** Phase 2 (background): copy each new card's image into Drive. Never blocks the app. */
+function downloadPending_() {
+  const dl = LockService.getDocumentLock();
+  if (!dl.tryLock(500)) return;
+  try {
+    const start = Date.now();
+    const sh = board_();
+    const n = sh.getLastRow() - 1;
+    if (n < 1) return;
+    const vals = sh.getRange(2, 1, n, COLS.length).getValues();
+    for (let i = 0; i < vals.length; i++) {
+      if (Date.now() - start > 240000) break;
+      const r = vals[i];
+      if (r[16] !== 'pending') continue;
+      let file = null, err = '';
+      try {
+        const blob = fetchImage_(r[8]);
+        const type = blob.getContentType().toLowerCase();
+        const ext = type.split('/')[1].split(/[+;]/)[0].replace('jpeg', 'jpg');
+        file = folder_(clean_(r[2] || 'Other')).createFile(blob.setName(
+          Utilities.formatDate(new Date(), TZ, 'yyyyMMdd-HHmmss') + '_' + slug_(r[3] || r[2]) + '.' + ext));
+        const desc = [r[4], r[5]].filter(Boolean).join('\n');
+        if (desc) file.setDescription(String(desc).slice(0, 4000));
+      } catch (e) { err = String(e.message || e); }
+      withLock_(() => {
+        const row = findRow_(r[9]);
+        if (!row) { if (file) file.setTrashed(true); return; }   // deleted meanwhile
+        if (file) { sh.getRange(row, 7).setValue(file.getUrl()); sh.getRange(row, 17).setValue(file.getId()); }
+        else { sh.getRange(row, 17).setValue('failed'); }
+      });
+      if (err) fail_(r[8], err + ' (card still shows the web image)');
+    }
+  } finally {
+    dl.releaseLock();
+  }
+}
+
+function fetchImage_(url) {
+  const res = UrlFetchApp.fetch(url, {
+    muteHttpExceptions: true, followRedirects: true,
+    headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36', 'Accept': 'image/*' }
+  });
+  if (res.getResponseCode() !== 200) throw new Error('download failed (' + res.getResponseCode() + ')');
+  const blob = res.getBlob();
+  if ((blob.getContentType() || '').toLowerCase().indexOf('image/') !== 0) throw new Error('not an image');
+  return blob;
+}
+
+function cardRow_(d, by, status) {
+  const url = d.imageUrl && /^https?:\/\//.test(d.imageUrl) ? d.imageUrl : '';
+  return [new Date(), url ? '=IMAGE("' + url.replace(/"/g, '%22') + '")' : '', safe_(clean_(d.tag || 'Other')),
+    safe_(d.title || ''), safe_(d.note || ''), safe_(d.pageUrl || ''), '', by, safe_(url), newId_(), status || 'new',
+    '', '', safe_((d.tags || []).map(clean_).join(', ')), '[]', url ? 'image' : (d.pageUrl ? 'link' : 'text'), url ? 'pending' : ''];
+}
+
+function itemKey_(imageUrl, title, pageUrl) {
+  return imageUrl ? 'i:' + String(imageUrl).trim() : 't:' + String(title || '').trim().toLowerCase() + '|' + String(pageUrl || '').trim();
+}
+
+function seenKeys_() {
+  const sh = board_();
+  const n = sh.getLastRow() - 1;
+  const set = new Set();
+  if (n < 1) return set;
+  sh.getRange(2, 1, n, 9).getValues().forEach(r => set.add(itemKey_(r[8], r[3], r[5])));
+  return set;
+}
+
+function withLock_(fn) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try { return fn(); } finally { lock.releaseLock(); }
+}
+
+function isFileId_(v) { return !!v && String(v).length > 20 && v !== 'pending' && v !== 'failed'; }
+
+/** One-off clean-up: removes duplicate cards (same image or same title+link), keeps the first. */
+function dedupe() {
+  withLock_(() => {
+    const sh = board_();
+    const n = sh.getLastRow() - 1;
+    if (n < 1) return;
+    const vals = sh.getRange(2, 1, n, COLS.length).getValues();
+    const seen = new Set(), dead = [];
+    vals.forEach((r, i) => {
+      const k = itemKey_(r[8], r[3], r[5]);
+      if (seen.has(k)) dead.push(i + 2); else seen.add(k);
+    });
+    dead.reverse().forEach(row => {
+      const fid = sh.getRange(row, 17).getValue();
+      if (isFileId_(fid)) { try { DriveApp.getFileById(fid).setTrashed(true); } catch (e) {} }
+      sh.deleteRow(row);
+    });
+    Logger.log('Removed ' + dead.length + ' duplicates');
+  });
 }
 
 /* ---------- saving ---------- */

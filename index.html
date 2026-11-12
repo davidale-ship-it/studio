@@ -43,7 +43,7 @@ input:focus,textarea:focus{border-color:var(--accent)}
 
 /* swipe */
 #swipe{position:fixed;inset:0;padding:calc(var(--safeT) + 64px) 16px calc(var(--safeB) + 110px);display:flex;align-items:center;justify-content:center}
-#deck{position:relative;width:min(420px,100%);height:100%;max-height:640px}
+#deck{position:relative;width:min(420px,100%);height:100%;max-height:640px;touch-action:none;user-select:none;-webkit-user-select:none}
 .sc{position:absolute;inset:0;background:var(--card);color:var(--cardText);border-radius:22px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 20px 50px rgba(0,0,0,.45);touch-action:none;user-select:none;will-change:transform}
 .sc .img{flex:1;min-height:0;background:#ddd8cc center/cover no-repeat;position:relative}
 .sc .img img{width:100%;height:100%;object-fit:cover;display:block;pointer-events:none}
@@ -242,7 +242,7 @@ const S = {
   url: LS.get('studio.url') || '', key: LS.get('studio.key') || '',
   items: [], groups: [], mode: LS.get('studio.mode') || 'swipe',
   s: Number(LS.get('studio.s')) || 0.8, tx: Number(LS.get('studio.tx')) || 0, ty: Number(LS.get('studio.ty')) || 0,
-  lasso: false, sel: new Set(), thumbs: new Map(), busy: 0
+  lasso: false, sel: new Set(), thumbs: new Map(), busy: 0, pre: new Set(), lastWrite: 0
 };
 const PALETTE = ['#f0997b', '#5dcaa5', '#afa9ec', '#fac775', '#ed93b1', '#85b7eb', '#97c459'];
 
@@ -272,11 +272,13 @@ async function load(quiet) {
   try {
     const j = await api('list');
     const prevIds = new Set(S.items.map(i => i.id));
+    if (Date.now() - S.lastWrite < 4000) { const local = new Map(S.items.map(i => [i.id, i])); j.items.forEach(i => { const l = local.get(i.id); if (l) { i.status = l.status; i.x = l.x; i.y = l.y; } }); }
     S.items = j.items; S.groups = j.groups;
     const fresh = S.items.filter(i => !prevIds.has(i.id) && i.status === 'new').length;
     placeMissing();
     render();
     if (quiet && fresh && prevIds.size) toast(fresh + ' new to swipe');
+    if (S.mode === 'swipe') renderDeck();
   } catch (e) { if (!quiet) fail(e); }
 }
 
@@ -313,58 +315,90 @@ function render() { renderSide(); if (S.mode === 'swipe') renderDeck(); else ren
 /* ---------------- swipe ---------------- */
 const deckItems = () => S.items.filter(i => i.status === 'new').sort((a, b) => (b.added || 0) - (a.added || 0));
 function renderDeck() {
+  if (S.dragging) return;
   const deck = $('#deck'), list = deckItems();
   $('#count').textContent = list.length ? list.length + ' to swipe' : '';
   $('#empty').classList.toggle('hidden', list.length > 0);
-  deck.classList.toggle('hidden', !list.length);
   $('#swipeBtns').style.visibility = list.length ? 'visible' : 'hidden';
-  const keep = new Set(list.slice(0, 3).map(i => i.id));
+  const show = list.slice(0, 3), keep = new Set(show.map(i => i.id));
   [...deck.children].forEach(c => { if (!keep.has(c.dataset.id) && !c.classList.contains('gone')) c.remove(); });
-  list.slice(0, 3).reverse().forEach((it, idxRev, arr) => {
+  show.slice().reverse().forEach((it, idxRev, arr) => {
     const depth = arr.length - 1 - idxRev;
-    let c = deck.querySelector('[data-id="' + it.id + '"]');
+    let c = deck.querySelector('.sc[data-id="' + it.id + '"]:not(.gone)');
     if (!c) {
       c = document.createElement('div'); c.className = 'sc' + (hasImage(it) ? '' : ' textonly'); c.dataset.id = it.id;
-      c.innerHTML = '<div class="img"><img alt=""></div><div class="txt"><h3>' + esc(it.title || it.tag || 'Untitled') + '</h3><p>' +
+      c.innerHTML = '<div class="img"><img alt="" draggable="false"></div><div class="txt"><h3>' + esc(it.title || it.tag || 'Untitled') + '</h3><p>' +
         esc(it.note || '') + '</p><div class="chips">' + allTags(it).map(t => '<span class="chip">' + esc(t) + '</span>').join('') +
-        (it.pageUrl ? '<a class="chip" href="' + esc(it.pageUrl) + '" target="_blank" rel="noopener" onclick="event.stopPropagation()">source ↗</a>' : '') +
+        (it.pageUrl ? '<a class="chip" href="' + esc(it.pageUrl) + '" target="_blank" rel="noopener">source ↗</a>' : '') +
         '</div></div><div class="stamp yes">KEEP</div><div class="stamp no">NOPE</div>';
       if (hasImage(it)) imgSrcFor(it, c.querySelector('img'));
-      bindSwipe(c, it);
+      c.style.transform = 'translateY(' + (depth + 1) * 10 + 'px) scale(' + (1 - (depth + 1) * 0.04) + ')';
     }
-    deck.appendChild(c);
-    c.style.transition = 'transform .25s';
-    c.style.transform = 'translateY(' + depth * 10 + 'px) scale(' + (1 - depth * 0.04) + ')';
+    const gone = deck.querySelector('.sc.gone');
+    if (gone) deck.insertBefore(c, gone); else deck.appendChild(c);
+    c.style.transition = 'transform .22s ease-out';
+    c.style.transform = depth ? 'translateY(' + depth * 10 + 'px) scale(' + (1 - depth * 0.04) + ')' : '';
     c.style.zIndex = 10 - depth;
-    c.style.pointerEvents = depth === 0 ? 'auto' : 'none';
   });
+  // warm up the next few images so they appear instantly
+  list.slice(3, 8).forEach(it => { if (it.imageUrl && !S.pre.has(it.id)) { S.pre.add(it.id); const im = new Image(); im.src = it.imageUrl; } });
 }
-function bindSwipe(c, it) {
-  let sx = 0, sy = 0, dx = 0, dy = 0, down = false, moved = false;
-  c.addEventListener('pointerdown', e => { if (e.target.closest('a')) return; down = true; moved = false; sx = e.clientX; sy = e.clientY; dx = dy = 0; c.setPointerCapture(e.pointerId); c.style.transition = 'none'; });
-  c.addEventListener('pointermove', e => {
-    if (!down) return; dx = e.clientX - sx; dy = e.clientY - sy; if (Math.abs(dx) + Math.abs(dy) > 6) moved = true;
-    c.style.transform = 'translate(' + dx + 'px,' + dy * 0.3 + 'px) rotate(' + dx / 18 + 'deg)';
-    c.querySelector('.stamp.yes').style.opacity = Math.max(0, Math.min(1, dx / 90));
-    c.querySelector('.stamp.no').style.opacity = Math.max(0, Math.min(1, -dx / 90));
+const topCard = () => { const it = deckItems()[0]; return it ? $('#deck').querySelector('.sc[data-id="' + it.id + '"]:not(.gone)') : null; };
+(() => {
+  const deck = $('#deck'); let d = null;
+  deck.addEventListener('pointerdown', e => {
+    if (e.target.closest('a')) return;
+    const c = topCard(); if (!c) return;
+    d = { c, sx: e.clientX, sy: e.clientY, dx: 0, dy: 0, moved: false }; S.dragging = true;
+    try { deck.setPointerCapture(e.pointerId); } catch (err) {}
+    c.style.transition = 'none';
+  });
+  deck.addEventListener('pointermove', e => {
+    if (!d) return;
+    d.dx = e.clientX - d.sx; d.dy = e.clientY - d.sy;
+    if (Math.abs(d.dx) + Math.abs(d.dy) > 6) d.moved = true;
+    d.c.style.transform = 'translate(' + d.dx + 'px,' + d.dy * 0.3 + 'px) rotate(' + d.dx / 18 + 'deg)';
+    d.c.querySelector('.stamp.yes').style.opacity = Math.max(0, Math.min(1, d.dx / 90));
+    d.c.querySelector('.stamp.no').style.opacity = Math.max(0, Math.min(1, -d.dx / 90));
   });
   const end = () => {
-    if (!down) return; down = false;
-    if (dx > 100) decide(it, true, c); else if (dx < -100) decide(it, false, c);
-    else { c.style.transition = 'transform .25s'; c.style.transform = ''; $$('.stamp').forEach(s => s.style.opacity = 0); if (!moved) openDetail(it); }
+    if (!d) return; const { c, dx, moved } = d; d = null; S.dragging = false;
+    const it = S.items.find(i => i.id === c.dataset.id); if (!it) return;
+    if (dx > 90) decide(it, true, c);
+    else if (dx < -90) decide(it, false, c);
+    else {
+      c.style.transition = 'transform .2s'; c.style.transform = '';
+      c.querySelectorAll('.stamp').forEach(s => s.style.opacity = 0);
+      if (!moved) openDetail(it);
+    }
   };
-  c.addEventListener('pointerup', end); c.addEventListener('pointercancel', end);
-}
+  deck.addEventListener('pointerup', end); deck.addEventListener('pointercancel', end);
+})();
 function decide(it, yes, c) {
-  c = c || $('#deck [data-id="' + it.id + '"]');
-  if (c) { c.classList.add('gone'); c.style.pointerEvents = 'none'; c.style.transition = 'transform .35s ease-in'; c.style.transform = 'translate(' + (yes ? 1 : -1) * innerWidth * 1.2 + 'px,40px) rotate(' + (yes ? 30 : -30) + 'deg)'; setTimeout(() => c.remove(), 360); }
+  c = c || topCard();
+  if (c) {
+    c.classList.add('gone'); c.style.pointerEvents = 'none'; c.style.zIndex = 20;
+    c.style.transition = 'transform .3s ease-in, opacity .3s';
+    c.style.transform = 'translate(' + (yes ? 1 : -1) * innerWidth * 1.1 + 'px,40px) rotate(' + (yes ? 25 : -25) + 'deg)';
+    c.style.opacity = 0.2;
+    setTimeout(() => c.remove(), 320);
+  }
   it.status = yes ? 'kept' : 'rejected';
   const patch = { status: it.status };
   if (yes && it.x == null) { const p = freeSpot(); it.x = p.x; it.y = p.y; patch.x = p.x; patch.y = p.y; }
-  setTimeout(renderDeck, 120);
+  renderDeck();            // next card is ready immediately
   renderSide();
+  S.lastWrite = Date.now();
   api('update', { id: it.id, patch }).catch(fail);
 }
+addEventListener('keydown', e => {
+  if (S.mode !== 'swipe' || e.target.matches('input,textarea') || $$('.sheet').some(x => !x.classList.contains('hidden'))) return;
+  const it = deckItems()[0]; if (!it) return;
+  if (e.key === 'ArrowRight') { e.preventDefault(); decide(it, true); }
+  else if (e.key === 'ArrowLeft') { e.preventDefault(); decide(it, false); }
+  else if (e.key === 'ArrowUp' || e.key === 'Enter') { e.preventDefault(); openDetail(it); }
+  else if (e.key === 'c' || e.key === 'C') { e.preventDefault(); openDetail(it, true); }
+});
 const topItem = () => deckItems()[0];
 $('#bYes').onclick = () => { const it = topItem(); if (it) decide(it, true); };
 $('#bNo').onclick = () => { const it = topItem(); if (it) decide(it, false); };
@@ -740,7 +774,7 @@ $('#mCanvas').onclick = () => setMode('canvas');
 if (!S.tx && !S.ty) { S.tx = innerWidth / 2; S.ty = innerHeight / 2; }
 setMode(S.mode);
 if (!S.url || !S.key) showSetup(); else load();
-setInterval(() => { if (document.visibilityState === 'visible' && !act && !S.busy) load(true); }, 25000);
+setInterval(() => { if (document.visibilityState === 'visible' && !act && !S.busy) load(true); }, 8000);
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') load(true); });
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 })();
