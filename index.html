@@ -105,6 +105,18 @@ input:focus,textarea:focus{border-color:var(--accent)}
 .sc .img .play{top:50%}
 img.noimg{visibility:hidden}
 .sc .img iframe.emb{width:100%;height:100%;border:0;pointer-events:none;background:#fff}
+/* playable cards: the real Instagram / YouTube / Drive player, laid out at 400px and scaled to the card */
+.live{position:relative;width:100%;overflow:hidden;background:#0d0d0f}
+.live iframe{position:absolute;left:0;top:0;border:0;transform-origin:0 0;background:#fff}
+.sc .img .live{position:absolute;inset:0}
+.cc.islive img,.cc.islive .play,.cc.islive .igb{display:none}
+.node.hid,.glabel.hid{display:none}
+#filterBar{position:fixed;top:62px;left:50%;transform:translateX(-50%);z-index:45;display:flex;gap:6px;align-items:center;background:var(--panel);border:1px solid var(--line);border-radius:999px;padding:5px 6px 5px 14px;font-size:14px;box-shadow:0 8px 24px rgba(0,0,0,.4);max-width:calc(100% - 20px)}
+#filterBar b{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tagpick{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0 8px}
+.tagpick button{border:1px solid var(--line);background:transparent;color:inherit;border-radius:999px;padding:6px 12px;font-size:13px}
+.tagpick button.on{background:var(--accent);border-color:var(--accent);color:#2a1308;font-weight:600}
+.newtag{display:flex;gap:6px}.newtag input{flex:1}
 iframe.embBig{width:100%;height:min(70vh,620px);border:0;border-radius:14px;background:#fff;margin-bottom:12px}
 .igb{position:absolute;top:8px;left:8px;font-size:10px;font-weight:700;padding:2px 6px;border-radius:6px;background:linear-gradient(45deg,#f09433,#dc2743,#bc1888);color:#fff}
 #lassoSvg{position:fixed;inset:0;pointer-events:none;z-index:6}
@@ -182,11 +194,13 @@ iframe.embBig{width:100%;height:min(70vh,620px);border:0;border-radius:14px;back
   <button class="icon" id="zoutBtn" aria-label="Zoom out">－</button>
 </div>
 <div id="hint" class="hidden"></div>
+<div id="filterBar" class="hidden"><b id="fbText"></b><button class="pill" id="fbPull">Pull together</button><button class="pill" id="fbClear" aria-label="Show all">✕</button></div>
 
 <!-- SIDE -->
 <div id="scrim" class="hidden"></div>
 <aside id="side">
   <h4>Tags</h4><div id="tagList"></div>
+  <h4>From</h4><div id="srcList"></div>
   <h4>Groups</h4><div id="groupList"></div>
   <h4>App</h4>
   <button class="row" id="settingsBtn">Settings</button>
@@ -333,6 +347,23 @@ function ytId(u) { const m = String(u || '').match(/(?:youtu\.be\/|[?&]v=|shorts
 const isVideoLink = u => /instagram\.com\/(reel|reels|tv)\/|tiktok\.com\/|youtu\.?be|vimeo\.com\//i.test(u || '');
 function igCode(u) { const m = String(u || '').match(/instagram\.com\/(?:[^/]+\/)?(?:p|reel|reels|tv)\/([\w-]+)/); return m && m[1]; }
 const igEmbed = it => { const c = igCode(it.pageUrl); return c ? 'https://www.instagram.com/p/' + c + '/embed/' : ''; };
+// the playable version of a card: Instagram post (carousels swipe, reels play), YouTube video, or your own Drive video
+function liveOf(it) {
+  const ig = igCode(it.pageUrl); if (ig) return { src: 'https://www.instagram.com/p/' + ig + '/embed/', w: 400, h: 560 };
+  const yt = ytId(it.pageUrl); if (yt) return { src: 'https://www.youtube-nocookie.com/embed/' + yt + '?playsinline=1&rel=0', w: 400, h: 225 };
+  if (it.kind === 'video' && it.fileId) return { src: 'https://drive.google.com/file/d/' + it.fileId + '/preview', w: 400, h: 500 };
+  return null;
+}
+function liveBox(L, width, fill) {
+  const box = document.createElement('div'); box.className = 'live';
+  const f = document.createElement('iframe');
+  f.src = L.src; f.loading = 'lazy'; f.allow = 'autoplay; encrypted-media; picture-in-picture; fullscreen'; f.allowFullscreen = true;
+  f.setAttribute('scrolling', 'no');
+  const k = width / L.w;
+  f.style.width = L.w + 'px'; f.style.height = L.h + 'px'; f.style.transform = 'scale(' + k + ')';
+  if (!fill) box.style.height = Math.round(L.h * k) + 'px';
+  box.appendChild(f); return box;
+}
 function visualOf(it) {
   const yt = ytId(it.pageUrl);
   if (it.kind === 'video') return { img: !!it.fileId, play: true };
@@ -358,6 +389,26 @@ async function thumb(it, el) {
   } catch (e) { el.classList.add('noimg'); }
 }
 const hasImage = it => visualOf(it).img;
+const myTags = it => [...new Set((it.tags || []).map(String).filter(Boolean))];
+const knownTags = () => { const s = new Set(); S.items.forEach(i => myTags(i).forEach(t => s.add(t))); return [...s].sort((a, b) => a.localeCompare(b)); };
+function matches(it) {
+  const f = S.filter; if (!f) return true;
+  if (f.type === 'none') return !myTags(it).length;
+  if (f.type === 'src') return (it.tag || '') === f.v;
+  return myTags(it).includes(f.v);
+}
+function setFilter(f) {
+  S.filter = f;
+  const bar = $('#filterBar');
+  if (f) {
+    const n = S.items.filter(i => (i.status === 'kept' || i.status === 'new') && matches(i)).length;
+    $('#fbText').textContent = (f.type === 'none' ? 'No tag' : f.type === 'src' ? 'From: ' + f.v : '#' + f.v) + ' · ' + n;
+    $('#fbPull').classList.toggle('hidden', S.mode !== 'canvas');
+  }
+  bar.classList.toggle('hidden', !f);
+  render();
+  if (f && S.mode === 'canvas') fitTo(canvasItems().filter(matches));
+}
 const allTags = it => [...new Set([it.tag, ...(it.tags || [])].filter(Boolean).map(String))];
 const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
@@ -368,12 +419,13 @@ function setMode(m) {
   ['#swipe', '#swipeBtns'].forEach(s => $(s).classList.toggle('hidden', m !== 'swipe'));
   ['#canvas', '#canvasBtns'].forEach(s => $(s).classList.toggle('hidden', m !== 'canvas'));
   if (m !== 'canvas') setLasso(false);
+  $('#fbPull').classList.toggle('hidden', m !== 'canvas');
   render();
 }
 function render() { renderSide(); if (S.mode === 'swipe') renderDeck(); else renderCanvas(); }
 
 /* ---------------- swipe ---------------- */
-const deckItems = () => S.items.filter(i => i.status === 'new').sort((a, b) => (b.added || 0) - (a.added || 0));
+const deckItems = () => S.items.filter(i => i.status === 'new' && matches(i)).sort((a, b) => (b.added || 0) - (a.added || 0));
 function renderDeck() {
   if (S.dragging) return;
   const deck = $('#deck'), list = deckItems();
@@ -387,8 +439,8 @@ function renderDeck() {
     let c = deck.querySelector('.sc[data-id="' + it.id + '"]:not(.gone)');
     if (!c) {
       const vv = visualOf(it);
-      c = document.createElement('div'); c.className = 'sc' + (vv.img || vv.embed ? '' : ' textonly'); c.dataset.id = it.id;
-      c.innerHTML = '<div class="img">' + (vv.embed && !vv.img ? '<iframe class="emb" src="' + vv.embed + '" loading="lazy" scrolling="no" tabindex="-1"></iframe>' : '<img alt="" draggable="false">') + (vv.play && !vv.embed ? '<div class="play">▶</div>' : '') + '</div><div class="txt"><h3>' + esc(it.title || it.tag || 'Untitled') + '</h3><p>' +
+      c = document.createElement('div'); c.className = 'sc' + (vv.img || vv.embed || liveOf(it) ? '' : ' textonly'); c.dataset.id = it.id;
+      c.innerHTML = '<div class="img">' + (vv.img ? '<img alt="" draggable="false">' : '') + (vv.play && !vv.embed ? '<div class="play">▶</div>' : '') + '</div><div class="txt"><h3>' + esc(it.title || it.tag || 'Untitled') + '</h3><p>' +
         esc(it.note || '') + '</p><div class="chips">' + allTags(it).map(t => '<span class="chip">' + esc(t) + '</span>').join('') +
         (it.pageUrl ? '<a class="chip" href="' + esc(it.pageUrl) + '" target="_blank" rel="noopener">source ↗</a>' : '') +
         '</div></div><div class="stamp yes">KEEP</div><div class="stamp no">NOPE</div>';
@@ -400,6 +452,12 @@ function renderDeck() {
     c.style.transition = 'transform .22s ease-out';
     c.style.transform = depth ? 'translateY(' + depth * 10 + 'px) scale(' + (1 - depth * 0.04) + ')' : '';
     c.style.zIndex = 10 - depth;
+    const L = liveOf(it), im = c.querySelector('.img');
+    if (!depth && L && im && !im.querySelector('.live')) {
+      const fe = im.querySelector('iframe.emb'); if (fe) fe.remove();
+      const lb = liveBox(L, im.offsetWidth || 380, true); im.appendChild(lb);
+      const k = (im.offsetWidth || 380) / L.w, f = lb.firstChild; f.style.top = Math.max(0, (im.offsetHeight - L.h * k) / 2) + 'px';
+    }
   });
   // warm up the next few images so they appear instantly
   list.slice(3, 8).forEach(it => { if (it.imageUrl && !S.pre.has(it.id)) { S.pre.add(it.id); const im = new Image(); im.src = it.imageUrl; } });
@@ -408,7 +466,7 @@ const topCard = () => { const it = deckItems()[0]; return it ? $('#deck').queryS
 (() => {
   const deck = $('#deck'); let d = null;
   deck.addEventListener('pointerdown', e => {
-    if (e.target.closest('a')) return;
+    if (e.target.closest('a') || e.target.closest('.live')) return;
     const c = topCard(); if (!c) return;
     d = { c, sx: e.clientX, sy: e.clientY, dx: 0, dy: 0, moved: false }; S.dragging = true;
     try { deck.setPointerCapture(e.pointerId); } catch (err) {}
@@ -472,9 +530,28 @@ const world = $('#world'), cvs = $('#canvas');
 function applyCam(save) {
   world.style.transform = 'translate(' + S.tx + 'px,' + S.ty + 'px) scale(' + S.s + ')';
   cvs.classList.toggle('far', S.s < 0.38);
+  clearTimeout(applyCam.t); applyCam.t = setTimeout(updateLive, 250);
   if (save) { LS.set('studio.s', S.s); LS.set('studio.tx', S.tx); LS.set('studio.ty', S.ty); }
 }
 const canvasItems = () => S.items.filter(i => i.status === 'kept');
+// cards turn into real players once they are big on screen (zoom in, or make the card bigger); max 6 at once so the app stays fast
+const LIVE_MIN = 230, LIVE_MAX = 6;
+function updateLive() {
+  if (S.mode !== 'canvas' || act) return;
+  const cx = innerWidth / 2, cy = innerHeight / 2;
+  const cand = canvasItems().filter(it => liveOf(it) && matches(it)).map(it => {
+    const w = (it.w || 180) * S.s, sx = it.x * S.s + S.tx, sy = it.y * S.s + S.ty;
+    return { it, w, d: Math.hypot(sx - cx, sy - cy), on: sx > -w / 2 && sx < innerWidth + w / 2 && sy > -w && sy < innerHeight + w };
+  }).filter(c => c.on && c.w >= LIVE_MIN).sort((a, b) => a.d - b.d).slice(0, LIVE_MAX);
+  const want = new Set(cand.map(c => c.it.id));
+  $$('#world .cc.islive').forEach(cc => { const n = cc.closest('.node'); if (!want.has(n.dataset.id)) { const lb = cc.querySelector('.live'); if (lb) lb.remove(); cc.classList.remove('islive'); } });
+  cand.forEach(({ it }) => {
+    const n = nodeEl(it.id); if (!n) return;
+    const cc = n.querySelector('.cc'); if (cc.classList.contains('islive')) return;
+    cc.classList.add('islive'); cc.classList.remove('text');
+    cc.insertBefore(liveBox(liveOf(it), it.w || 180), cc.firstChild);
+  });
+}
 const itemById = id => S.items.find(i => i.id === id);
 const nodeEl = id => world.querySelector('.node[data-id="' + id + '"]');
 const groupOf = id => S.groups.find(g => g.members.includes(id));
@@ -506,8 +583,8 @@ function renderCanvas() {
     }
     const v = visualOf(it), ncom = (it.comments || []).length;
     const sig = [it.title, it.note, it.imageUrl, it.fileId, it.kind, ncom, allTags(it).join()].join('|');
-    if (n.dataset.sig !== sig) {
-      n.dataset.sig = sig;
+    if (n.dataset.sig !== sig + '|' + (it.w || '')) {
+      n.dataset.sig = sig + '|' + (it.w || '');
       n.innerHTML = '<div class="fl"><div class="cc' + (v.img ? '' : ' text') + '">' + (v.img ? '<img alt="" draggable="false">' : '') +
         (v.play ? '<div class="play">▶</div>' : '') + (v.embed ? '<div class="igb">IG</div>' : '') +
         (v.img ? '<div class="cap">' + esc(it.title || it.tag || '') + '</div>'
@@ -521,8 +598,10 @@ function renderCanvas() {
     n.style.left = it.x + 'px'; n.style.top = it.y + 'px';
     const cc = n.querySelector('.cc'); if (it.w) cc.style.setProperty('--w', it.w + 'px'); else cc.style.removeProperty('--w');
     n.classList.toggle('sel', S.sel.has(it.id));
+    n.classList.toggle('hid', !matches(it));
   });
   layoutGroups();
+  clearTimeout(applyCam.t); applyCam.t = setTimeout(updateLive, 250);
 }
 function centroid(ids) {
   const its = ids.map(itemById).filter(i => i && i.status === 'kept' && i.x != null);
@@ -551,8 +630,9 @@ function zoomAt(sx, sy, f) {
   S.s = Math.min(2.5, Math.max(0.12, S.s * f));
   S.tx = sx - w.x * S.s; S.ty = sy - w.y * S.s; applyCam(true);
 }
-function fitAll() {
-  const items = canvasItems(); if (!items.length) { S.s = 0.8; S.tx = innerWidth / 2; S.ty = innerHeight / 2; applyCam(true); return; }
+function fitAll() { fitTo(canvasItems().filter(matches)); }
+function fitTo(items) {
+  if (!items.length) { S.s = 0.8; S.tx = innerWidth / 2; S.ty = innerHeight / 2; applyCam(true); return; }
   const xs = items.map(i => i.x), ys = items.map(i => i.y);
   const l = Math.min(...xs) - 150, r = Math.max(...xs) + 150, t = Math.min(...ys) - 170, b = Math.max(...ys) + 170;
   const top = 70, bottom = 40;
@@ -680,8 +760,8 @@ function endPtr(e) {
   if (act.type === 'pan') { applyCam(true); cvs.style.cursor = ''; if (!act.moved && S.sel.size) { S.sel.clear(); renderCanvas(); } }
   if (act.type === 'resize') {
     act.node.classList.remove('resizing');
-    if (act.moved) { enqueue('update', { id: act.it.id, patch: { w: act.it.w } }); queueMove(act.it); }
-    act = null; return;
+    if (act.moved) { enqueue('update', { id: act.it.id, patch: { w: act.it.w } }); queueMove(act.it); const lb = act.cc.querySelector('.live'); if (lb) { lb.remove(); act.cc.classList.remove('islive'); } }
+    act = null; setTimeout(updateLive, 50); return;
   }
   if (act.type === 'card') {
     act.node.classList.remove('drag');
@@ -767,12 +847,16 @@ function openGroup(id) {
 
 /* ---------------- side panel ---------------- */
 function renderSide() {
-  const counts = {};
-  S.items.filter(i => i.status === 'kept').forEach(it => allTags(it).forEach(t => counts[t] = (counts[t] || 0) + 1));
-  const tags = Object.keys(counts).sort((a, b) => counts[b] - counts[a]);
-  $('#tagList').innerHTML = tags.length ? tags.map((t, i) => '<button class="row" data-tag="' + esc(t) + '"><span class="sw" style="background:' + PALETTE[i % PALETTE.length] + '"></span>' + esc(t) + '<span class="n">' + counts[t] + '</span></button>').join('') : '<p class="muted" style="padding:0 10px">No tags yet</p>';
+  // Tags = the ones you give yourself. From = where the item came from (set automatically).
+  const live = S.items.filter(i => i.status === 'kept' || i.status === 'new');
+  const tc = {}, sc = {}; let none = 0;
+  live.forEach(it => { const mt = myTags(it); if (!mt.length) none++; mt.forEach(t => tc[t] = (tc[t] || 0) + 1); if (it.tag) sc[it.tag] = (sc[it.tag] || 0) + 1; });
+  const row = (type, v, label, n, i) => '<button class="row' + (S.filter && S.filter.type === type && (S.filter.v || '') === (v || '') ? ' on' : '') + '" data-ft="' + type + '" data-fv="' + esc(v || '') + '"><span class="sw" style="background:' + PALETTE[i % PALETTE.length] + '"></span>' + esc(label) + '<span class="n">' + n + '</span></button>';
+  const tags = Object.keys(tc).sort((a, b) => tc[b] - tc[a]);
+  $('#tagList').innerHTML = tags.map((t, i) => row('tag', t, t, tc[t], i)).join('') + row('none', '', 'No tag', none, 7);
+  $('#srcList').innerHTML = Object.keys(sc).sort((a, b) => sc[b] - sc[a]).map((t, i) => row('src', t, t, sc[t], i + 3)).join('');
   $('#groupList').innerHTML = S.groups.length ? S.groups.map((g, i) => '<button class="row" data-group="' + esc(g.id) + '"><span class="sw" style="background:' + (g.color || PALETTE[i % PALETTE.length]) + '"></span>' + esc(g.name) + '<span class="n">' + g.members.length + '</span></button>').join('') : '<p class="muted" style="padding:0 10px">Circle cards on the canvas to make one</p>';
-  $$('#tagList [data-tag]').forEach(b => b.onclick = () => { closeSide(); gather(S.items.filter(i => allTags(i).includes(b.dataset.tag)).map(i => i.id)); toast(b.dataset.tag); });
+  $$('#tagList [data-ft], #srcList [data-ft]').forEach(b => b.onclick = () => { closeSide(); setFilter({ type: b.dataset.ft, v: b.dataset.fv }); });
   $$('#groupList [data-group]').forEach(b => b.onclick = () => {
     closeSide(); const g = S.groups.find(x => x.id === b.dataset.group); if (!g) return;
     if (S.mode !== 'canvas') setMode('canvas');
@@ -782,6 +866,8 @@ function renderSide() {
 }
 const openSide = () => { $('#side').classList.add('open'); $('#scrim').classList.remove('hidden'); };
 const closeSide = () => { $('#side').classList.remove('open'); $('#scrim').classList.add('hidden'); };
+$('#fbClear').onclick = () => setFilter(null);
+$('#fbPull').onclick = () => gather(canvasItems().filter(matches).map(i => i.id));
 $('#menuBtn').onclick = openSide; $('#scrim').onclick = closeSide;
 $('#settingsBtn').onclick = () => { closeSide(); showSetup(); };
 
@@ -797,10 +883,12 @@ function fmt(t) { try { return new Date(t).toLocaleString([], { month: 'short', 
 function openDetail(it, focusComment, focusDelete) {
   const img = hasImage(it);
   const vd = visualOf(it);
-  sheet('detail', (vd.embed ? '<iframe class="embBig" src="' + vd.embed + '" scrolling="no"></iframe>' : img ? '<img class="big" id="dImg" alt="">' : '') +
+  const LD = liveOf(it);
+  sheet('detail', (LD ? '<iframe class="embBig" src="' + esc(LD.src) + '" allow="autoplay; encrypted-media; picture-in-picture; fullscreen" allowfullscreen' + (LD.h < LD.w ? ' style="height:auto;aspect-ratio:16/9"' : '') + '></iframe>' : img ? '<img class="big" id="dImg" alt="">' : '') +
     '<h2>' + esc(it.title || it.tag || 'Untitled') + '</h2>' + (it.note ? '<p class="note">' + esc(it.note) + '</p>' : '') +
-    '<label>Tags</label><input id="dTags" value="' + esc((it.tags || []).join(', ')) + '" placeholder="add tags, comma separated">' +
-    (it.tag ? '<p class="muted" style="margin:6px 2px 0">Folder: ' + esc(it.tag) + '</p>' : '') +
+    '<label>Tags</label><div class="tagpick" id="dTagPick"></div>' +
+    '<div class="newtag"><input id="dNewTag" placeholder="New tag" maxlength="40"><button class="pill" id="dAddTag">+ Add</button></div>' +
+    (it.tag ? '<p class="muted" style="margin:8px 2px 0">From: ' + esc(it.tag) + '</p>' : '') +
     (it.status === 'kept' && S.groups.length ? '<label>Groups</label><div class="btns" id="dGroups" style="margin-top:0">' + S.groups.map(g => '<button class="pill' + (g.members.includes(it.id) ? ' accent' : '') + '" data-g="' + esc(g.id) + '">' + esc(g.name) + '</button>').join('') + '</div>' : '') +
     '<label>Comments</label><div id="dCm">' + (it.comments || []).map(c => '<div class="cm"><small>' + fmt(c.t) + '</small>' + esc(c.text) + '</div>').join('') + '</div>' +
     '<textarea id="dNew" placeholder="What do you like about it? What could it become?"></textarea>' +
@@ -810,7 +898,26 @@ function openDetail(it, focusComment, focusDelete) {
     (it.driveUrl ? '<a class="pill" href="' + esc(it.driveUrl) + '" target="_blank" rel="noopener">' + (it.kind === 'video' ? '▶ Play' : 'Drive ↗') + '</a>' : '') +
     (it.status === 'kept' ? '<button class="pill" id="dBack">Back to deck</button>' : '') +
     '<button class="pill danger" id="dDel">Delete</button></div>');
-  if (img) imgSrcFor(it, $('#dImg'));
+  if (img && !LD) imgSrcFor(it, $('#dImg'));
+  const saveTags = () => { enqueue('update', { id: it.id, patch: { tags: it.tags } }); render(); };
+  const drawTags = () => {
+    const mine = new Set(myTags(it)), all = [...new Set([...knownTags(), ...mine])];
+    $('#dTagPick').innerHTML = all.length ? all.map(t => '<button class="' + (mine.has(t) ? 'on' : '') + '" data-t="' + esc(t) + '">' + (mine.has(t) ? '✓ ' : '+ ') + esc(t) + '</button>').join('') : '<span class="muted">No tags yet — make the first one below</span>';
+    $$('#dTagPick [data-t]').forEach(b => b.onclick = () => {
+      const t = b.dataset.t; const cur = myTags(it);
+      it.tags = cur.includes(t) ? cur.filter(x => x !== t) : cur.concat(t);
+      drawTags(); saveTags();
+    });
+  };
+  drawTags();
+  const addNew = () => {
+    const t = $('#dNewTag').value.trim().replace(/\s+/g, ' '); if (!t) return;
+    const ex = knownTags().find(x => x.toLowerCase() === t.toLowerCase()) || t;   // reuse the same spelling if it exists
+    if (!myTags(it).includes(ex)) it.tags = myTags(it).concat(ex);
+    $('#dNewTag').value = ''; drawTags(); saveTags();
+  };
+  $('#dAddTag').onclick = addNew;
+  $('#dNewTag').onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); addNew(); } };
   $$('#dGroups [data-g]').forEach(b => b.onclick = () => {
     const g = S.groups.find(x => x.id === b.dataset.g); if (!g) return;
     if (g.members.includes(it.id)) g.members = g.members.filter(m => m !== it.id); else g.members.push(it.id);
@@ -819,10 +926,9 @@ function openDetail(it, focusComment, focusDelete) {
   if (focusComment) setTimeout(() => $('#dNew').focus(), 60);
   if (focusDelete) setTimeout(() => $('#dDel').click(), 60);
   $('#dSave').onclick = async () => {
-    const tags = $('#dTags').value.split(',').map(s => s.trim()).filter(Boolean), txt = $('#dNew').value.trim();
-    it.tags = tags; closeSheets(); render();
+    const txt = $('#dNew').value.trim();
+    closeSheets(); render();
     try {
-      enqueue('update', { id: it.id, patch: { tags } });
       if (txt) { const r = await api('comment', { id: it.id, text: txt }); it.comments = r.comments; render(); }
       toast('Saved');
     } catch (e) { fail(e); }
