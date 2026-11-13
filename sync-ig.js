@@ -5,7 +5,7 @@
 (() => {
   const CFG = window.__artCfg || {};
   const FOLDER = CFG.folder || 'Saved';
-  const MAX_REMOVE = CFG.maxRemove || 60;
+  const MAX_REMOVE = CFG.maxRemove || 100;
   const DRY = !!CFG.dryRun;
   const ORIGIN = 'https://davidale-ship-it.github.io';
   const BRIDGE = ORIGIN + '/studio/bridge.html';
@@ -20,10 +20,14 @@
     tiles.set(m[2], t);
   });
   async function collect() {
-    let last = -1, same = 0;
-    for (let i = 0; i < 80 && same < 3; i++) {
-      grab(); window.scrollTo(0, document.documentElement.scrollHeight); await sleep(1400); grab();
-      if (tiles.size === last) same++; else { same = 0; last = tiles.size; }
+    // the grid only keeps ~30 posts on the page, so walk down one screen at a time and note each one
+    let stuck = 0;
+    for (let i = 0; i < 2000 && stuck < 6; i++) {
+      grab(); A.found = tiles.size;
+      const before = window.scrollY;
+      window.scrollBy(0, Math.round(innerHeight * 0.8)); await sleep(650); grab();
+      const atEnd = window.scrollY + innerHeight >= document.documentElement.scrollHeight - 5;
+      if (window.scrollY === before || atEnd) { stuck++; await sleep(900); } else stuck = 0;
     }
     window.scrollTo(0, 0); A.found = tiles.size;
   }
@@ -72,14 +76,19 @@
     A.state = 'pictures';
     const todo = all.filter(t => need.has(t.code) && t.src);
     A.picturesWanted = todo.length;
-    for (let i = 0; i < todo.length; i += 6) {
-      const batch = [];
-      for (const t of todo.slice(i, i + 6)) {
-        try { batch.push({ code: t.code, type: t.type, caption: t.caption || '', imageBase64: await pic(t), mimeType: 'image/jpeg' }); }
-        catch (e) { A.errors.push('picture ' + t.code); }
+    const chunks = []; for (let i = 0; i < todo.length; i += 5) chunks.push(todo.slice(i, i + 5));
+    let next = 0;
+    const worker = async () => {   // three at a time
+      while (next < chunks.length) {
+        const ch = chunks[next++];
+        const batch = (await Promise.all(ch.map(async t => {
+          try { return { code: t.code, type: t.type, caption: t.caption || '', imageBase64: await pic(t), mimeType: 'image/jpeg' }; }
+          catch (e) { if (A.errors.length < 50) A.errors.push('picture ' + t.code); return null; }
+        }))).filter(Boolean);
+        if (batch.length) { try { const r = await send(batch); A.pictures += r.pictures || 0; } catch (e) { if (A.errors.length < 50) A.errors.push(e.message); } }
       }
-      if (batch.length) { const r = await send(batch); A.pictures += r.pictures || 0; }
-    }
+    };
+    await Promise.all([worker(), worker(), worker()]);
     try { win.close(); } catch (e) {}
     A.state = 'removing'; A.toRemove = remove.length; A.removeCodes = remove.slice(0, MAX_REMOVE);
     if (!DRY) for (const code of A.removeCodes) {

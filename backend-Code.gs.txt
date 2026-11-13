@@ -104,6 +104,7 @@ function api_(d) {
   switch (d.action) {
     case 'list': { const added = ingest_(); return { ok: true, items: listItems_(), groups: listGroups_(), added: added, time: Date.now() }; }
     case 'thumb': return thumb_(d.fileId);
+    case 'importSaved': return importSaved_(d);   // locks only for the short sheet write
   }
   const lock = LockService.getScriptLock();
   lock.waitLock(20000);
@@ -118,7 +119,6 @@ function api_(d) {
       case 'upload': return saveItem_(d, 'App', 'kept');
       case 'saveGroup': return saveGroup_(d.group);
       case 'deleteGroup': return deleteGroup_(d.id);
-      case 'importSaved': return importSaved_(d);
       default: return { ok: false, error: 'unknown action ' + d.action };
     }
   } finally {
@@ -427,46 +427,65 @@ function importSaved_(d) {
   const src = d.source === 'yt' ? 'yt' : 'ig';
   const folder = clean_(d.folder || 'Saved');
   const tag = (src === 'ig' ? 'IG ' : 'YT ') + folder;
+  const items = (d.items || []).map(it => Object.assign({}, it, { code: String(it.code || '').replace(/[^\w-]/g, '') })).filter(it => it.code);
+  // 1. pictures first, outside the lock (slow Drive work must not block the app)
+  const before = savedIndex_();
+  const files = {};
+  items.forEach(it => {
+    if (src !== 'ig' || !it.imageBase64) return;
+    const ex = before[src + ':' + it.code];
+    if (ex && isFileId_(ex.fid)) return;
+    const f = savePicture_(it, tag, it.caption || it.code);
+    if (f) files[it.code] = f;
+  });
+  // 2. quick sheet update under the lock
+  return withLock_(() => {
+    const sh = board_();
+    const byKey = savedIndex_();
+    const rejected = rejectedKeys_();
+    const remove = [], need = [], rows = [];
+    let added = 0, pictures = 0;
+    items.forEach(it => {
+      const code = it.code, key = src + ':' + code, f = files[code];
+      if (rejected.has(key)) { remove.push(code); if (f) f.setTrashed(true); return; }
+      const ex = byKey[key];
+      if (ex) {
+        if (ex.status === 'kept') remove.push(code);
+        if (src === 'ig' && !isFileId_(ex.fid)) {
+          if (!f) { need.push(code); return; }
+          if (ex.row) { sh.getRange(ex.row, 7).setValue(f.getUrl()); sh.getRange(ex.row, 16).setValue('image'); sh.getRange(ex.row, 17).setValue(f.getId()); ex.fid = f.getId(); pictures++; }
+        } else if (f) f.setTrashed(true);
+        return;
+      }
+      const caption = String(it.caption || '').replace(/\s+/g, ' ').trim();
+      const pageUrl = src === 'ig' ? 'https://www.instagram.com/' + (it.type === 'reel' ? 'reel' : 'p') + '/' + code + '/' : 'https://www.youtube.com/watch?v=' + code;
+      const title = caption ? (caption.length > 90 ? caption.slice(0, 88) + '…' : caption) : (src === 'ig' ? (it.type === 'reel' ? 'Reel' : 'Post') : 'Video');
+      const note = 'Saved on ' + (src === 'ig' ? 'Instagram' : 'YouTube') + ' · ' + folder + (caption.length > 90 ? '\n' + caption.slice(0, 600) : '');
+      if (src === 'yt') {
+        rows.push(cardRow_({ imageUrl: 'https://i.ytimg.com/vi/' + code + '/hqdefault.jpg', title: title, note: note, pageUrl: pageUrl, tag: tag }, 'Sync', 'new'));
+      } else {
+        const r = cardRow_({ title: title, note: note, pageUrl: pageUrl, tag: tag }, 'Sync', 'new');
+        if (f) { r[6] = f.getUrl(); r[15] = 'image'; r[16] = f.getId(); pictures++; } else need.push(code);
+        rows.push(r);
+      }
+      byKey[key] = { row: 0, status: 'new', fid: f ? f.getId() : '' };
+      added++;
+    });
+    if (rows.length) sh.getRange(sh.getLastRow() + 1, 1, rows.length, COLS.length).setValues(rows);
+    return { ok: true, added: added, pictures: pictures, remove: remove, need: need };
+  });
+}
+
+/** Instagram/YouTube cards on the board, by "ig:CODE" / "yt:ID". */
+function savedIndex_() {
   const sh = board_();
   const n = sh.getLastRow() - 1;
-  const vals = n > 0 ? sh.getRange(2, 1, n, COLS.length).getValues() : [];
   const byKey = {};
-  vals.forEach((r, i) => { const k = sourceKey_(r[5]); if (k && !byKey[k]) byKey[k] = { row: i + 2, status: r[10], fid: r[16] }; });
-  const rejected = rejectedKeys_();
-  const remove = [], need = [], rows = [];
-  let added = 0, pictures = 0;
-  (d.items || []).forEach(it => {
-    const code = String(it.code || '').replace(/[^\w-]/g, '');
-    if (!code) return;
-    const key = src + ':' + code;
-    if (rejected.has(key)) { remove.push(code); return; }
-    const ex = byKey[key];
-    if (ex) {
-      if (ex.status === 'kept') remove.push(code);
-      if (src === 'ig' && !isFileId_(ex.fid)) {
-        if (!it.imageBase64) { need.push(code); return; }
-        const f = ex.row ? savePicture_(it, tag, it.caption || code) : null;
-        if (f) { sh.getRange(ex.row, 7).setValue(f.getUrl()); sh.getRange(ex.row, 16).setValue('image'); sh.getRange(ex.row, 17).setValue(f.getId()); ex.fid = f.getId(); pictures++; }
-      }
-      return;
-    }
-    const caption = String(it.caption || '').replace(/\s+/g, ' ').trim();
-    const pageUrl = src === 'ig' ? 'https://www.instagram.com/' + (it.type === 'reel' ? 'reel' : 'p') + '/' + code + '/' : 'https://www.youtube.com/watch?v=' + code;
-    const title = caption ? (caption.length > 90 ? caption.slice(0, 88) + '…' : caption) : (src === 'ig' ? (it.type === 'reel' ? 'Reel' : 'Post') : 'Video');
-    const note = 'Saved on ' + (src === 'ig' ? 'Instagram' : 'YouTube') + ' · ' + folder + (caption.length > 90 ? '\n' + caption.slice(0, 600) : '');
-    if (src === 'yt') {
-      rows.push(cardRow_({ imageUrl: 'https://i.ytimg.com/vi/' + code + '/hqdefault.jpg', title: title, note: note, pageUrl: pageUrl, tag: tag }, 'Sync', 'new'));
-    } else {
-      const r = cardRow_({ title: title, note: note, pageUrl: pageUrl, tag: tag }, 'Sync', 'new');
-      const f = it.imageBase64 ? savePicture_(it, tag, title) : null;
-      if (f) { r[6] = f.getUrl(); r[15] = 'image'; r[16] = f.getId(); pictures++; } else need.push(code);
-      rows.push(r);
-    }
-    byKey[key] = { row: 0, status: 'new' };
-    added++;
+  if (n < 1) return byKey;
+  sh.getRange(2, 1, n, COLS.length).getValues().forEach((r, i) => {
+    const k = sourceKey_(r[5]); if (k && !byKey[k]) byKey[k] = { row: i + 2, status: r[10], fid: r[16] };
   });
-  if (rows.length) sh.getRange(sh.getLastRow() + 1, 1, rows.length, COLS.length).setValues(rows);
-  return { ok: true, added: added, pictures: pictures, remove: remove, need: need };
+  return byKey;
 }
 
 function savePicture_(it, tag, title) {

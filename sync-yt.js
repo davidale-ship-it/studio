@@ -21,10 +21,14 @@
     vids.set(id, { code: id, caption: ((a.getAttribute('title') || a.textContent || '').trim() + (ch ? ' — ' + ch.textContent.trim() : '')).slice(0, 300) });
   });
   async function collect() {
-    let last = -1, same = 0;
-    for (let i = 0; i < 80 && same < 3; i++) {
-      grab(); window.scrollTo(0, document.documentElement.scrollHeight); await sleep(1500); grab();
-      if (vids.size === last) same++; else { same = 0; last = vids.size; }
+    // the grid only keeps ~30 posts on the page, so walk down one screen at a time and note each one
+    let stuck = 0;
+    for (let i = 0; i < 2000 && stuck < 6; i++) {
+      grab(); A.found = vids.size;
+      const before = window.scrollY;
+      window.scrollBy(0, Math.round(innerHeight * 0.8)); await sleep(900); grab();
+      const atEnd = window.scrollY + innerHeight >= document.documentElement.scrollHeight - 5;
+      if (window.scrollY === before || atEnd) { stuck++; await sleep(900); } else stuck = 0;
     }
     window.scrollTo(0, 0); A.found = vids.size;
   }
