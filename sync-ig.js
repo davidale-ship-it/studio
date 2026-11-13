@@ -1,7 +1,8 @@
 // Art Studio — Instagram saved-folder sync. Run on https://www.instagram.com/<user>/saved/<folder>/<id>/
 // Set window.__artCfg = { folder: 'Art Inspiration', maxRemove: 60 } first. Returns at once; progress is in window.__art.
 // 1. scrolls the folder and collects every post  2. a "Send to Art Studio" button appears (needs one real click: it opens the relay)
-// 3. sends the posts (+ pictures only for the ones the app has no picture of)  4. unsaves the posts Dávid already judged in the app.
+// 3. sends the posts (+ pictures only for the ones the app has no picture of)
+// 4. state 'click-to-remove': unsave the posts Dávid already judged — the agent clicks, see __artStep below.
 (() => {
   const CFG = window.__artCfg || {};
   const FOLDER = CFG.folder || 'Saved';
@@ -21,13 +22,16 @@
   });
   async function collect() {
     // the grid only keeps ~30 posts on the page, so walk down one screen at a time and note each one
-    let stuck = 0;
-    for (let i = 0; i < 2000 && stuck < 6; i++) {
+    let stuck = 0, lastH = 0;
+    for (let i = 0; i < 3000 && stuck < 8; i++) {
       grab(); A.found = tiles.size;
       const before = window.scrollY;
       window.scrollBy(0, Math.round(innerHeight * 0.8)); await sleep(650); grab();
       const atEnd = window.scrollY + innerHeight >= document.documentElement.scrollHeight - 5;
-      if (window.scrollY === before || atEnd) { stuck++; await sleep(900); } else stuck = 0;
+      const h = document.documentElement.scrollHeight;
+      // at the bottom: only finish once the page has stopped growing for ~15 s (more posts load slowly in a background tab)
+      if (window.scrollY === before || atEnd) { if (h === lastH) stuck++; else stuck = 0; lastH = h; await sleep(1500); }
+      else { stuck = 0; lastH = h; }
     }
     window.scrollTo(0, 0); A.found = tiles.size;
   }
@@ -54,16 +58,70 @@
     win.postMessage({ type: 'art-import', id, source: 'ig', folder: FOLDER, items }, ORIGIN);
     setTimeout(() => { if (waiters[id]) { delete waiters[id]; rej(new Error('relay timeout')); } }, 150000);
   });
-  const ALPHA = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
-  const pk = code => { let n = 0n; for (const ch of code.slice(0, 11)) n = n * 64n + BigInt(ALPHA.indexOf(ch)); return n.toString(); };
-  const csrf = () => (document.cookie.match(/(?:^|;\s*)csrftoken=([^;]+)/) || [])[1] || '';
-  async function unsave(code) {
-    const r = await fetch('/api/v1/web/save/' + pk(code) + '/unsave/', {
-      method: 'POST', credentials: 'include', body: '',
-      headers: { 'x-csrftoken': csrf(), 'x-ig-app-id': '936619743392459', 'x-requested-with': 'XMLHttpRequest', 'content-type': 'application/x-www-form-urlencoded' } });
-    const j = await r.json().catch(() => ({}));
-    if (!r.ok || j.status !== 'ok') throw new Error('unsave ' + code + ' failed (' + r.status + ')');
+  // ---- removal: Instagram only accepts a real click on its bookmark. The script opens each judged post and lines it up;
+  // the agent clicks the same screen point each time and calls __artStep() again. A transparent shield catches clicks
+  // whenever the bookmark is NOT exactly under that point, so a click can never land on anything else.
+  const R = { list: [], i: -1, done: 0, skipped: 0, point: null, cur: null };
+  const shield = document.createElement('div');
+  shield.style.cssText = 'position:fixed;inset:0;z-index:2147483646;background:transparent';
+  const icon = re => [...document.querySelectorAll('[role=dialog] svg[aria-label]')].find(s => re.test(s.getAttribute('aria-label')));
+  const savedIcon = () => icon(/^(Remove|Eltávolítás)$/), unsavedIcon = () => icon(/^(Save|Mentés)$/);
+  // close the post pop-up the way a person would (Escape, then its ✕). Never "back": Instagram sometimes jumps a page too far.
+  async function closePost() {
+    for (let k = 0; k < 3 && document.querySelector('[role=dialog]'); k++) {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true }));
+      await sleep(900);
+      if (!document.querySelector('[role=dialog]')) break;
+      const s = [...document.querySelectorAll('svg[aria-label]')].find(x => /^(Bezárás|Close)$/.test(x.getAttribute('aria-label')));
+      const b = s && s.closest('[role=button],button'); if (b) { b.click(); await sleep(900); }
+    }
   }
+  async function openPost(code) {
+    const find = () => document.querySelector('main a[href*="/' + code + '/"]');
+    let a = find();
+    if (!a) { window.scrollTo(0, 0); await sleep(700); a = find(); }
+    for (let k = 0; k < 800 && !a; k++) { const y = window.scrollY; window.scrollBy(0, Math.round(innerHeight * 0.8)); await sleep(450); a = find(); if (!a && window.scrollY === y) { await sleep(1500); a = find(); if (!a && window.scrollY === y) break; } }
+    if (!a) return false;
+    a.scrollIntoView({ block: 'center' }); await sleep(300); a.click();
+    for (let k = 0; k < 30; k++) { await sleep(300); if (savedIcon() || unsavedIcon()) return true; }
+    return false;
+  }
+  window.__artStep = async () => {
+    if (R.cur) {
+      // inside a folder Instagram asks "remove from collection / remove from saved?" — remove from saved (Dávid wants the folders wiped)
+      for (let k = 0; k < 12; k++) {
+        await sleep(300);
+        const c = [...document.querySelectorAll('[role=dialog] button')].find(x => /^(Eltávolítás|Remove|Unsave)$/.test(x.textContent.trim()));
+        if (c) { c.click(); break; }
+        if (unsavedIcon() && !savedIcon()) break;
+      }
+      await sleep(1000);
+      if (unsavedIcon() && !savedIcon()) R.done++; else R.skipped++;
+      R.cur = null; A.removed = R.done;
+    }
+    shield.remove(); await closePost();
+    while (++R.i < R.list.length) {
+      const code = R.list[R.i];
+      if (!(await openPost(code))) { R.skipped++; continue; }
+      const s = savedIcon();
+      if (!s) { R.done++; A.removed = R.done; await closePost(); continue; }   // already not saved
+      const b = s.closest('[role=button],button'), r = b.getBoundingClientRect();
+      if (!R.point) R.point = { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
+      let hit = document.elementFromPoint(R.point.x, R.point.y);
+      if (!(hit && b.contains(hit))) {
+        // photos and videos lay the post out differently: nudge the pop-up so the bookmark sits under the same point
+        const dlg = b.closest('[role=dialog]');
+        if (dlg) { dlg.style.transform = 'translate(' + (R.point.x - (r.x + r.width / 2)) + 'px,' + (R.point.y - (r.y + r.height / 2)) + 'px)'; await sleep(150); }
+        hit = document.elementFromPoint(R.point.x, R.point.y);
+      }
+      if (hit && b.contains(hit)) { R.cur = code; return { ready: true, x: R.point.x, y: R.point.y, viewportWidth: innerWidth, left: R.list.length - R.i - 1, removed: R.done }; }
+      R.skipped++; await closePost();
+    }
+    document.body.appendChild(shield);
+    A.state = 'done';
+    return { ready: false, removed: R.done, skipped: R.skipped, x: R.point ? R.point.x : 0, y: R.point ? R.point.y : 0, viewportWidth: innerWidth };
+  };
+  window.__artRemove = codes => { R.list = codes.slice(0, MAX_REMOVE); R.i = -1; R.cur = null; R.done = 0; R.skipped = 0; A.state = 'click-to-remove'; return R.list.length; };
   async function run() {
     A.state = 'sending';
     win = window.open(BRIDGE, 'artbridge', 'popup,width=440,height=320');
@@ -90,12 +148,9 @@
     };
     await Promise.all([worker(), worker(), worker()]);
     try { win.close(); } catch (e) {}
-    A.state = 'removing'; A.toRemove = remove.length; A.removeCodes = remove.slice(0, MAX_REMOVE);
-    if (!DRY) for (const code of A.removeCodes) {
-      try { await unsave(code); A.removed++; } catch (e) { A.errors.push(e.message); if (!A.removed && A.errors.length >= 3) break; }
-      await sleep(2500 + Math.random() * 2000);
-    }
-    A.state = 'done';
+    A.toRemove = remove.length; A.removeCodes = remove.slice(0, MAX_REMOVE);
+    R.list = DRY ? [] : A.removeCodes.slice();
+    A.state = R.list.length ? 'click-to-remove' : 'done';   // the agent now calls __artStep() and clicks
   }
   const btn = document.createElement('button');
   btn.id = 'art-sync-btn'; btn.textContent = 'Send to Art Studio · ' + FOLDER;
