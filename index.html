@@ -79,8 +79,8 @@ input:focus,textarea:focus{border-color:var(--accent)}
 @keyframes drift{from{transform:translate(0,0) rotate(var(--r0,-.6deg))}to{transform:translate(var(--dx,6px),var(--dy,-8px)) rotate(var(--r1,.6deg))}}
 @media (prefers-reduced-motion:reduce){.node .fl{animation:none}}
 .node.drag .fl{animation-play-state:paused}
-.cc{width:180px;background:var(--card);color:var(--cardText);border-radius:14px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,.45);cursor:pointer}
-.cc img{width:100%;display:block;max-height:240px;object-fit:cover;pointer-events:none;background:#ddd8cc;min-height:80px}
+.cc{width:var(--w,180px);background:var(--card);color:var(--cardText);border-radius:14px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,.45);cursor:pointer}
+.cc img{width:100%;display:block;max-height:calc(var(--w,180px) * 1.6);object-fit:cover;pointer-events:none;background:#ddd8cc;min-height:80px}
 .cc .t{padding:8px 10px 10px;font-size:12.5px;line-height:1.3}
 .cc .t b{display:block;font-size:13px;margin-bottom:2px}
 .cc .t span{color:#6b675e;display:block;max-height:4em;overflow:hidden}
@@ -89,7 +89,14 @@ input:focus,textarea:focus{border-color:var(--accent)}
 .cc .dot{position:absolute;top:8px;right:8px;min-width:20px;height:20px;border-radius:10px;background:var(--accent);color:#2a1308;font-size:11px;font-weight:700;display:grid;place-items:center;padding:0 5px}
 .node.sel .cc{outline:3px solid var(--accent);outline-offset:3px}
 .far .cc .t{display:none}
-.far .cc{width:120px}
+.far .cc{width:calc(var(--w,180px) * .67)}
+.cc .cap{padding:4px 8px 5px;font-size:10.5px;line-height:1.25;color:#57534b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.far .cc .cap{display:none}
+.rz{position:absolute;right:0;bottom:0;width:26px;height:26px;cursor:nwse-resize;touch-action:none;opacity:0;transition:opacity .15s;z-index:2}
+.rz::after{content:"";position:absolute;right:6px;bottom:6px;width:10px;height:10px;border-right:2.5px solid rgba(0,0,0,.55);border-bottom:2.5px solid rgba(0,0,0,.55);border-radius:0 0 3px 0;filter:drop-shadow(0 0 1.5px rgba(255,255,255,.9))}
+.node:hover .rz,.node.sel .rz{opacity:1}
+@media (hover:none){.node .rz{opacity:.75}}
+.node.resizing .fl{animation-play-state:paused}
 .glabel{position:absolute;transform:translate(-50%,-50%);z-index:100000;display:flex;align-items:center;gap:4px;padding:7px 8px 7px 16px;border-radius:999px;font-size:15px;font-weight:650;color:#1b1b1f;cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none;box-shadow:0 6px 20px rgba(0,0,0,.45);white-space:nowrap}
 .glabel .gm{width:26px;height:26px;border-radius:50%;background:rgba(0,0,0,.14);font-size:15px;line-height:1;color:#1b1b1f}
 .node.ing .cc{box-shadow:0 0 0 3px var(--gc),0 10px 28px rgba(0,0,0,.45)}
@@ -227,7 +234,7 @@ iframe.embBig{width:100%;height:min(70vh,620px);border:0;border-radius:14px;back
     <button class="pill" id="addNote">Note</button>
     <button class="pill" id="addLink">Link</button>
   </div>
-  <input type="file" id="fileIn" accept="image/*,video/*" multiple class="hidden">
+  <input type="file" id="fileIn" multiple class="hidden">
   <div id="addForm" class="hidden">
     <label id="aTitleL">Title</label><input id="aTitle">
     <div id="aUrlWrap"><label>Link</label><input id="aUrl" placeholder="https://"></div>
@@ -308,6 +315,9 @@ async function load(quiet) {
     const prevIds = new Set(S.items.map(i => i.id));
     if (Date.now() - S.lastWrite < 4000) { const local = new Map(S.items.map(i => [i.id, i])); j.items.forEach(i => { const l = local.get(i.id); if (l) { i.status = l.status; i.x = l.x; i.y = l.y; } }); }
     j.items = j.items.filter(i => !S.tomb.has(i.id));
+    const num = x => (x === '' || x == null || isNaN(+x)) ? null : +x;
+    j.items.forEach(i => { i.x = num(i.x); i.y = num(i.y); i.w = num(i.w); });
+    j.groups.forEach(g => { g.x = num(g.x); g.y = num(g.y); });
     S.items = j.items; S.groups = j.groups;
     S.items.filter(i => i.status === 'rejected').forEach(i => dropItem(i, true));   // left swipes never stay in the sheet
     const fresh = S.items.filter(i => !prevIds.has(i.id) && i.status === 'new').length;
@@ -500,14 +510,16 @@ function renderCanvas() {
       n.dataset.sig = sig;
       n.innerHTML = '<div class="fl"><div class="cc' + (v.img ? '' : ' text') + '">' + (v.img ? '<img alt="" draggable="false">' : '') +
         (v.play ? '<div class="play">▶</div>' : '') + (v.embed ? '<div class="igb">IG</div>' : '') +
-        '<div class="t"><b>' + esc(it.title || (v.img ? '' : 'Note')) + '</b><span>' + esc(v.img ? allTags(it).join(' · ') : (it.note || '')) + '</span></div>' +
-        (ncom ? '<div class="dot">' + ncom + '</div>' : '') + '</div></div>';
+        (v.img ? '<div class="cap">' + esc(it.title || it.tag || '') + '</div>'
+          : '<div class="t"><b>' + esc(it.title || 'Note') + '</b><span>' + esc(it.note || '') + '</span></div>') +
+        (ncom ? '<div class="dot">' + ncom + '</div>' : '') + '<div class="rz" title="Drag to resize"></div></div></div>';
       if (v.img) imgSrcFor(it, n.querySelector('img'));
     }
     const g = groupOf(it.id);
     n.classList.toggle('ing', !!g);
     n.style.setProperty('--gc', g ? gColor(g) : 'transparent');
     n.style.left = it.x + 'px'; n.style.top = it.y + 'px';
+    const cc = n.querySelector('.cc'); if (it.w) cc.style.setProperty('--w', it.w + 'px'); else cc.style.removeProperty('--w');
     n.classList.toggle('sel', S.sel.has(it.id));
   });
   layoutGroups();
@@ -614,6 +626,14 @@ cvs.addEventListener('pointerdown', e => {
     act = { type: 'group', g, el: gl, sx: e.clientX, sy: e.clientY, gx: g.x, gy: g.y, mem, start: mem.map(i => ({ x: i.x, y: i.y })), moved: false };
     return;
   }
+  const rz = e.target.closest('.rz');
+  if (rz) {
+    const node = rz.closest('.node'), it = itemById(node.dataset.id);
+    front(node); node.classList.add('resizing');
+    const w0 = node.querySelector('.cc').offsetWidth, h0 = node.offsetHeight;
+    act = { type: 'resize', it, node, cc: node.querySelector('.cc'), sx: e.clientX, sy: e.clientY, w0, l: it.x - w0 / 2, t: it.y - h0 / 2, moved: false };
+    return;
+  }
   const node = e.target.closest('.node');
   if (node) {
     const it = itemById(node.dataset.id);
@@ -635,6 +655,13 @@ cvs.addEventListener('pointermove', e => {
   const dx = e.clientX - act.sx, dy = e.clientY - act.sy;
   if (Math.abs(dx) + Math.abs(dy) > 5) act.moved = true;
   if (act.type === 'pan') { S.tx = act.tx + dx; S.ty = act.ty + dy; applyCam(); cvs.style.cursor = 'grabbing'; }
+  if (act.type === 'resize') {
+    // corner drag: top-left corner stays put, the picture keeps its shape
+    const w = Math.round(Math.min(1200, Math.max(90, act.w0 + dx / S.s)));
+    act.it.w = w; act.cc.style.setProperty('--w', w + 'px');
+    act.it.x = act.l + w / 2; act.it.y = act.t + act.node.offsetHeight / 2;
+    act.node.style.left = act.it.x + 'px'; act.node.style.top = act.it.y + 'px'; return;
+  }
   if (act.type === 'card' && act.moved) {
     act.ids.forEach((id, k) => { const it = itemById(id); it.x = act.start[k].x + dx / S.s; it.y = act.start[k].y + dy / S.s;
       const n = nodeEl(id); if (n) { n.style.left = it.x + 'px'; n.style.top = it.y + 'px'; } });
@@ -651,6 +678,11 @@ function endPtr(e) {
   if (!act) return;
   if (act.type === 'pinch') { if (ptrs.size === 0) { act = null; applyCam(true); } return; }
   if (act.type === 'pan') { applyCam(true); cvs.style.cursor = ''; if (!act.moved && S.sel.size) { S.sel.clear(); renderCanvas(); } }
+  if (act.type === 'resize') {
+    act.node.classList.remove('resizing');
+    if (act.moved) { enqueue('update', { id: act.it.id, patch: { w: act.it.w } }); queueMove(act.it); }
+    act = null; return;
+  }
   if (act.type === 'card') {
     act.node.classList.remove('drag');
     if (act.moved) act.ids.forEach(id => queueMove(itemById(id)));
@@ -846,18 +878,25 @@ $('#fileIn').onchange = async e => {
   const files = [...e.target.files]; e.target.value = ''; closeSheets();
   for (const f of files) {
     try {
-      const video = (f.type || '').indexOf('video/') === 0;
+      const ext = (f.name.split('.').pop() || '').toLowerCase();
+      const mimeOf = { heic: 'image/heic', heif: 'image/heif', mov: 'video/quicktime', mp4: 'video/mp4', m4v: 'video/mp4', webm: 'video/webm', jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp' };
+      const type = f.type || mimeOf[ext] || '';
+      if (!/^(image|video)\//.test(type)) { toast(f.name + ' is not a photo or video', 3500); continue; }
+      const video = type.indexOf('video/') === 0;
       if (video && f.size > 30 * 1024 * 1024) { toast(f.name + ' is over 30 MB. Trim it or add the link instead.', 4500); continue; }
       toast('Uploading ' + f.name + '…', 6000);
-      const { data, mime } = video ? await rawB64(f) : await shrink(f);
+      let pack;
+      if (video) pack = await rawB64(f, type);
+      else { try { pack = await shrink(f); } catch (err) { if (f.size > 30 * 1024 * 1024) throw new Error(f.name + ' is too big'); pack = await rawB64(f, type); } }
+      const { data, mime } = pack;
       const p = freeSpot();
       await api('upload', { imageBase64: data, mimeType: mime, title: f.name.replace(/\.[^.]+$/, ''), tag: video ? 'Videos' : 'Uploads', x: p.x, y: p.y });
     } catch (err) { fail(err); }
   }
   await load(); if (S.mode !== 'canvas') setMode('canvas'); toast('Uploaded');
 };
-function rawB64(file) {
-  return new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res({ data: String(r.result).split(',')[1], mime: file.type }); r.onerror = rej; r.readAsDataURL(file); });
+function rawB64(file, type) {
+  return new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res({ data: String(r.result).split(',')[1], mime: type || file.type }); r.onerror = rej; r.readAsDataURL(file); });
 }
 async function shrink(file) {
   const bmp = await createImageBitmap(file);

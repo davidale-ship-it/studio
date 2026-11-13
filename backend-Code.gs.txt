@@ -19,6 +19,7 @@ const FAILED = 'Failed';
 const GROUPS = 'Groups';
 const COLS = ['Added', 'Preview', 'Tag', 'Title', 'Note', 'Source page', 'Drive file', 'Added by', 'Image URL',
   'ID', 'Status', 'X', 'Y', 'Tags', 'Comments', 'Kind', 'FileId'];
+const W_COL = 18;   // card width on the canvas (column R, header 'W')
 const GROUP_COLS = ['ID', 'Name', 'Members', 'Color', 'Created', 'X', 'Y'];
 const MAX_FILES_PER_RUN = 15;
 const TZ = 'Europe/Budapest';
@@ -117,6 +118,7 @@ function api_(d) {
       case 'upload': return saveItem_(d, 'App', 'kept');
       case 'saveGroup': return saveGroup_(d.group);
       case 'deleteGroup': return deleteGroup_(d.id);
+      case 'importSaved': return importSaved_(d);
       default: return { ok: false, error: 'unknown action ' + d.action };
     }
   } finally {
@@ -128,7 +130,7 @@ function listItems_() {
   const sh = board_();
   const n = sh.getLastRow() - 1;
   if (n < 1) return [];
-  return sh.getRange(2, 1, n, COLS.length).getValues()
+  return sh.getRange(2, 1, n, W_COL).getValues()
     .filter(r => r[9])
     .map(rowToItem_);
 }
@@ -147,7 +149,8 @@ function rowToItem_(r) {
     comments: comments,
     kind: r[15] || 'image',
     fileId: isFileId_(r[16]) ? r[16] : '',
-    pending: r[16] === 'pending'
+    pending: r[16] === 'pending',
+    w: r[17] === '' || r[17] == null ? null : Number(r[17])
   };
 }
 
@@ -171,6 +174,10 @@ function updateItem_(id, p) {
   if (p.tags !== undefined) set(14, safe_((p.tags || []).map(clean_).join(', ')));
   if (p.title !== undefined) set(4, safe_(p.title));
   if (p.note !== undefined) set(5, safe_(p.note));
+  if (p.w !== undefined) {
+    if (sh.getRange(1, W_COL).getValue() !== 'W') sh.getRange(1, W_COL).setValue('W').setFontWeight('bold');
+    set(W_COL, p.w ? Math.round(p.w) : '');
+  }
   return { ok: true };
 }
 
@@ -409,9 +416,82 @@ function cardRow_(d, by, status) {
 
 function igCode_(u) { const m = String(u || '').match(/instagram\.com\/(?:[^/]+\/)?(?:p|reel|reels|tv)\/([\w-]+)/); return m ? m[1] : ''; }
 
+function ytId_(u) { const m = String(u || '').match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?(?:.*&)?v=|shorts\/|embed\/))([\w-]{11})/); return m ? m[1] : ''; }
+function sourceKey_(u) { const ig = igCode_(u); if (ig) return 'ig:' + ig; const yt = ytId_(u); return yt ? 'yt:' + yt : ''; }
+
+/* ---------- saved Instagram / YouTube sync (sent by the daily sync through bridge.html) ---------- */
+
+/** Adds new saved posts/videos as swipe cards, stores Instagram pictures, and answers which ones
+ *  Dávid already judged (swiped either way) so the sync can remove them from Instagram / YouTube. */
+function importSaved_(d) {
+  const src = d.source === 'yt' ? 'yt' : 'ig';
+  const folder = clean_(d.folder || 'Saved');
+  const tag = (src === 'ig' ? 'IG ' : 'YT ') + folder;
+  const sh = board_();
+  const n = sh.getLastRow() - 1;
+  const vals = n > 0 ? sh.getRange(2, 1, n, COLS.length).getValues() : [];
+  const byKey = {};
+  vals.forEach((r, i) => { const k = sourceKey_(r[5]); if (k && !byKey[k]) byKey[k] = { row: i + 2, status: r[10], fid: r[16] }; });
+  const rejected = rejectedKeys_();
+  const remove = [], need = [], rows = [];
+  let added = 0, pictures = 0;
+  (d.items || []).forEach(it => {
+    const code = String(it.code || '').replace(/[^\w-]/g, '');
+    if (!code) return;
+    const key = src + ':' + code;
+    if (rejected.has(key)) { remove.push(code); return; }
+    const ex = byKey[key];
+    if (ex) {
+      if (ex.status === 'kept') remove.push(code);
+      if (src === 'ig' && !isFileId_(ex.fid)) {
+        if (!it.imageBase64) { need.push(code); return; }
+        const f = ex.row ? savePicture_(it, tag, it.caption || code) : null;
+        if (f) { sh.getRange(ex.row, 7).setValue(f.getUrl()); sh.getRange(ex.row, 16).setValue('image'); sh.getRange(ex.row, 17).setValue(f.getId()); ex.fid = f.getId(); pictures++; }
+      }
+      return;
+    }
+    const caption = String(it.caption || '').replace(/\s+/g, ' ').trim();
+    const pageUrl = src === 'ig' ? 'https://www.instagram.com/' + (it.type === 'reel' ? 'reel' : 'p') + '/' + code + '/' : 'https://www.youtube.com/watch?v=' + code;
+    const title = caption ? (caption.length > 90 ? caption.slice(0, 88) + '…' : caption) : (src === 'ig' ? (it.type === 'reel' ? 'Reel' : 'Post') : 'Video');
+    const note = 'Saved on ' + (src === 'ig' ? 'Instagram' : 'YouTube') + ' · ' + folder + (caption.length > 90 ? '\n' + caption.slice(0, 600) : '');
+    if (src === 'yt') {
+      rows.push(cardRow_({ imageUrl: 'https://i.ytimg.com/vi/' + code + '/hqdefault.jpg', title: title, note: note, pageUrl: pageUrl, tag: tag }, 'Sync', 'new'));
+    } else {
+      const r = cardRow_({ title: title, note: note, pageUrl: pageUrl, tag: tag }, 'Sync', 'new');
+      const f = it.imageBase64 ? savePicture_(it, tag, title) : null;
+      if (f) { r[6] = f.getUrl(); r[15] = 'image'; r[16] = f.getId(); pictures++; } else need.push(code);
+      rows.push(r);
+    }
+    byKey[key] = { row: 0, status: 'new' };
+    added++;
+  });
+  if (rows.length) sh.getRange(sh.getLastRow() + 1, 1, rows.length, COLS.length).setValues(rows);
+  return { ok: true, added: added, pictures: pictures, remove: remove, need: need };
+}
+
+function savePicture_(it, tag, title) {
+  try {
+    const mime = it.mimeType || 'image/jpeg';
+    const blob = Utilities.newBlob(Utilities.base64Decode(it.imageBase64), mime,
+      Utilities.formatDate(new Date(), TZ, 'yyyyMMdd-HHmmss') + '_' + slug_(title) + '.' + (mime.split('/')[1] || 'jpg').replace('jpeg', 'jpg'));
+    return folder_(tag).createFile(blob);
+  } catch (e) { fail_(it.code, 'picture not saved: ' + e); return null; }
+}
+
+/** Instagram/YouTube items Dávid swiped left (rows are deleted, but the Rejected log keeps the link). */
+function rejectedKeys_() {
+  const set = new Set();
+  const it = DriveApp.getFolderById(SYSTEM_ID).getFilesByName('Rejected log.txt');
+  if (!it.hasNext()) return set;
+  it.next().getBlob().getDataAsString().split('\n').forEach(line => { const u = line.split(' | ').pop(); const k = sourceKey_(u); if (k) set.add(k); });
+  return set;
+}
+
 function itemKey_(imageUrl, title, pageUrl) {
   const ig = igCode_(pageUrl);
   if (ig) return 'ig:' + ig;
+  const yt = ytId_(pageUrl);
+  if (yt) return 'yt:' + yt;
   return imageUrl ? 'i:' + String(imageUrl).trim() : 't:' + String(title || '').trim().toLowerCase() + '|' + String(pageUrl || '').trim();
 }
 
