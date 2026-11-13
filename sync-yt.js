@@ -22,13 +22,16 @@
   });
   async function collect() {
     // the grid only keeps ~30 posts on the page, so walk down one screen at a time and note each one
-    let stuck = 0;
-    for (let i = 0; i < 2000 && stuck < 6; i++) {
+    let stuck = 0, lastH = 0;
+    for (let i = 0; i < 3000 && stuck < 8; i++) {
       grab(); A.found = vids.size;
       const before = window.scrollY;
       window.scrollBy(0, Math.round(innerHeight * 0.8)); await sleep(900); grab();
       const atEnd = window.scrollY + innerHeight >= document.documentElement.scrollHeight - 5;
-      if (window.scrollY === before || atEnd) { stuck++; await sleep(900); } else stuck = 0;
+      const h = document.documentElement.scrollHeight;
+      // at the bottom: only finish once the page has stopped growing for ~15 s (more posts load slowly in a background tab)
+      if (window.scrollY === before || atEnd) { if (h === lastH) stuck++; else stuck = 0; lastH = h; await sleep(1500); }
+      else { stuck = 0; lastH = h; }
     }
     window.scrollTo(0, 0); A.found = vids.size;
   }
@@ -54,7 +57,8 @@
     const item = [...document.querySelectorAll('ytd-popup-container ytd-menu-service-item-renderer')]
       .find(x => x.offsetParent !== null && /^\s*(Remove from|Eltávolítás)/i.test(x.textContent));
     if (!item) { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); throw new Error('no remove option ' + id); }
-    item.click(); await sleep(1100);
+    item.click(); await sleep(1300);
+    if (rows().some(x => idOf(x) === id)) throw new Error('remove ' + id + ' not confirmed');
   }
   async function run() {
     A.state = 'sending';
