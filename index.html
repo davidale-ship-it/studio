@@ -110,6 +110,11 @@ img.noimg{visibility:hidden}
 .live iframe{position:absolute;left:0;top:0;border:0;transform-origin:0 0;background:#fff}
 .sc .img .live{position:absolute;inset:0}
 .cc.islive img,.cc.islive .play,.cc.islive .igb{display:none}
+.live .shield{position:absolute;inset:0;z-index:2;cursor:grab;background:transparent}
+.live .shield::after{content:"▶ tap to play";position:absolute;left:50%;bottom:10px;transform:translateX(-50%);padding:4px 10px;border-radius:999px;background:rgba(0,0,0,.55);color:#fff;font-size:12px;opacity:0;transition:opacity .2s;white-space:nowrap}
+.node:hover .live .shield::after{opacity:1}
+.cc.playing .live .shield{display:none}
+.cc.playing{outline:3px solid var(--accent2);outline-offset:3px}
 .node.hid,.glabel.hid{display:none}
 #filterBar{position:fixed;top:62px;left:50%;transform:translateX(-50%);z-index:45;display:flex;gap:6px;align-items:center;background:var(--panel);border:1px solid var(--line);border-radius:999px;padding:5px 6px 5px 14px;font-size:14px;box-shadow:0 8px 24px rgba(0,0,0,.4);max-width:calc(100% - 20px)}
 #filterBar b{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -354,7 +359,7 @@ function liveOf(it) {
   if (it.kind === 'video' && it.fileId) return { src: 'https://drive.google.com/file/d/' + it.fileId + '/preview', w: 400, h: 500 };
   return null;
 }
-function liveBox(L, width, fill) {
+function liveBox(L, width, fill, shield) {
   const box = document.createElement('div'); box.className = 'live';
   const f = document.createElement('iframe');
   f.src = L.src; f.loading = 'lazy'; f.allow = 'autoplay; encrypted-media; picture-in-picture; fullscreen'; f.allowFullscreen = true;
@@ -362,7 +367,22 @@ function liveBox(L, width, fill) {
   const k = width / L.w;
   f.style.width = L.w + 'px'; f.style.height = L.h + 'px'; f.style.transform = 'scale(' + k + ')';
   if (!fill) box.style.height = Math.round(L.h * k) + 'px';
-  box.appendChild(f); return box;
+  box.appendChild(f);
+  if (shield) { const s = document.createElement('div'); s.className = 'shield'; box.appendChild(s); }
+  return box;
+}
+// one canvas card at a time can be "playing" (its cover is off, so you can use the player)
+function activate(it, n) {
+  const cc = n && n.querySelector('.cc.islive'); if (!cc) return false;
+  if (S.active && S.active !== it.id) deactivate();
+  cc.classList.add('playing'); S.active = it.id; front(n); return true;
+}
+function deactivate() {
+  if (!S.active) return;
+  const n = nodeEl(S.active); S.active = null;
+  const cc = n && n.querySelector('.cc'); if (!cc) return;
+  cc.classList.remove('playing');
+  const f = cc.querySelector('.live iframe'); if (f) f.src = f.src;   // reloading the player stops the video
 }
 function visualOf(it) {
   const yt = ytId(it.pageUrl);
@@ -419,6 +439,7 @@ function setMode(m) {
   ['#swipe', '#swipeBtns'].forEach(s => $(s).classList.toggle('hidden', m !== 'swipe'));
   ['#canvas', '#canvasBtns'].forEach(s => $(s).classList.toggle('hidden', m !== 'canvas'));
   if (m !== 'canvas') setLasso(false);
+  deactivate();
   $('#fbPull').classList.toggle('hidden', m !== 'canvas');
   render();
 }
@@ -535,7 +556,7 @@ function applyCam(save) {
 }
 const canvasItems = () => S.items.filter(i => i.status === 'kept');
 // cards turn into real players once they are big on screen (zoom in, or make the card bigger); max 6 at once so the app stays fast
-const LIVE_MIN = 230, LIVE_MAX = 6;
+const LIVE_MIN = 230, LIVE_MAX = 4;
 function updateLive() {
   if (S.mode !== 'canvas' || act) return;
   const cx = innerWidth / 2, cy = innerHeight / 2;
@@ -544,12 +565,13 @@ function updateLive() {
     return { it, w, d: Math.hypot(sx - cx, sy - cy), on: sx > -w / 2 && sx < innerWidth + w / 2 && sy > -w && sy < innerHeight + w };
   }).filter(c => c.on && c.w >= LIVE_MIN).sort((a, b) => a.d - b.d).slice(0, LIVE_MAX);
   const want = new Set(cand.map(c => c.it.id));
+  if (S.active && !want.has(S.active)) S.active = null;
   $$('#world .cc.islive').forEach(cc => { const n = cc.closest('.node'); if (!want.has(n.dataset.id)) { const lb = cc.querySelector('.live'); if (lb) lb.remove(); cc.classList.remove('islive'); } });
   cand.forEach(({ it }) => {
     const n = nodeEl(it.id); if (!n) return;
     const cc = n.querySelector('.cc'); if (cc.classList.contains('islive')) return;
     cc.classList.add('islive'); cc.classList.remove('text');
-    cc.insertBefore(liveBox(liveOf(it), it.w || 180), cc.firstChild);
+    cc.insertBefore(liveBox(liveOf(it), it.w || 180, false, true), cc.firstChild);
   });
 }
 const itemById = id => S.items.find(i => i.id === id);
@@ -579,6 +601,8 @@ function renderCanvas() {
       n.style.setProperty('--d', (7 + h % 6) + 's'); n.style.setProperty('--dl', -(h % 9) + 's');
       n.style.setProperty('--dx', ((h % 13) - 6) + 'px'); n.style.setProperty('--dy', ((h % 17) - 8) + 'px');
       n.style.setProperty('--r0', (-(h % 10) / 10) + 'deg'); n.style.setProperty('--r1', ((h % 7) / 10) + 'deg');
+      n.addEventListener('pointerenter', () => { n._in = true; });
+      n.addEventListener('pointerleave', () => { n._in = false; if (S.active === n.dataset.id) setTimeout(() => { if (!n._in && S.active === n.dataset.id && !n.matches(':hover')) deactivate(); }, 1500); });
       world.appendChild(n);
     }
     const v = visualOf(it), ncom = (it.comments || []).length;
@@ -693,6 +717,7 @@ function queueMove(it) {
 }
 function front(n) { if (n) n.style.zIndex = ++S.z; }
 cvs.addEventListener('pointerdown', e => {
+  if (S.active) { const an = nodeEl(S.active); if (!an || !an.contains(e.target)) deactivate(); }
   if (e.target.closest('.gm')) { const el = e.target.closest('.glabel'); openGroup(el.dataset.id); return; }
   try { cvs.setPointerCapture(e.pointerId); } catch (err) {}
   ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
@@ -719,7 +744,7 @@ cvs.addEventListener('pointerdown', e => {
     const it = itemById(node.dataset.id);
     front(node);
     const ids = S.sel.has(it.id) ? [...S.sel] : [it.id];
-    act = { type: 'card', it, node, ids, sx: e.clientX, sy: e.clientY, start: ids.map(id => { const x = itemById(id); return { x: x.x, y: x.y }; }), moved: false };
+    act = { type: 'card', it, node, ids, sx: e.clientX, sy: e.clientY, start: ids.map(id => { const x = itemById(id); return { x: x.x, y: x.y }; }), moved: false, onLive: !!e.target.closest('.live') };
     node.classList.add('drag');
   } else act = { type: 'pan', sx: e.clientX, sy: e.clientY, tx: S.tx, ty: S.ty, moved: false };
 });
@@ -734,6 +759,7 @@ cvs.addEventListener('pointermove', e => {
   if (act.type === 'lasso') { act.pts.push([e.clientX, e.clientY]); $('#lassoPath').setAttribute('d', 'M' + act.pts.map(p => p.join(',')).join('L') + 'Z'); return; }
   const dx = e.clientX - act.sx, dy = e.clientY - act.sy;
   if (Math.abs(dx) + Math.abs(dy) > 5) act.moved = true;
+  if (act.type === 'pan' && act.moved) deactivate();
   if (act.type === 'pan') { S.tx = act.tx + dx; S.ty = act.ty + dy; applyCam(); cvs.style.cursor = 'grabbing'; }
   if (act.type === 'resize') {
     // corner drag: top-left corner stays put, the picture keeps its shape
@@ -766,7 +792,8 @@ function endPtr(e) {
   if (act.type === 'card') {
     act.node.classList.remove('drag');
     if (act.moved) act.ids.forEach(id => queueMove(itemById(id)));
-    else openDetail(act.it);
+    else if (act.onLive && S.active !== act.it.id && activate(act.it, act.node)) { /* first tap on a player: start using it */ }
+    else { deactivate(); openDetail(act.it); }
   }
   if (act.type === 'group') {
     const g = act.g;
@@ -779,14 +806,14 @@ function endPtr(e) {
 }
 cvs.addEventListener('pointerup', endPtr); cvs.addEventListener('pointercancel', endPtr);
 cvs.addEventListener('wheel', e => {
-  e.preventDefault();
+  e.preventDefault(); deactivate();
   if (e.ctrlKey || e.metaKey) zoomAt(e.clientX, e.clientY, Math.exp(-e.deltaY * 0.01));
   else { S.tx -= e.deltaX; S.ty -= e.deltaY; applyCam(true); }
 }, { passive: false });
 addEventListener('keydown', e => {
   if (S.mode !== 'canvas' || e.target.matches('input,textarea')) return;
   if (e.shiftKey && e.key === '!') fitAll();
-  if (e.key === 'Escape') { setLasso(false); S.sel.clear(); renderCanvas(); }
+  if (e.key === 'Escape') { deactivate(); setLasso(false); S.sel.clear(); renderCanvas(); }
   if (e.key === 'l' || e.key === 'L') setLasso(!S.lasso);
 });
 
@@ -873,7 +900,7 @@ $('#settingsBtn').onclick = () => { closeSide(); showSetup(); };
 
 /* ---------------- sheets ---------------- */
 function sheet(id, html) { S.openedAt = Date.now(); const el = $('#' + id); if (html != null) el.querySelector('.box').innerHTML = '<button class="close" data-close>✕</button>' + html; el.classList.remove('hidden'); }
-function closeSheets() { $$('.sheet').forEach(s => { if (s.id !== 'setup') s.classList.add('hidden'); }); }
+function closeSheets() { $$('.sheet').forEach(s => { if (s.id !== 'setup') { s.classList.add('hidden'); s.querySelectorAll('iframe').forEach(f => f.remove()); } }); }
 document.addEventListener('click', e => { if (e.target.matches('[data-close]') || (e.target.classList.contains('sheet') && e.target.id !== 'setup' && Date.now() - (S.openedAt || 0) > 450)) closeSheets(); });
 function armDelete(btn, fn) {
   btn.onclick = () => { if (btn.classList.contains('arm')) { fn(); return; } btn.classList.add('arm'); btn.dataset.t = btn.textContent; btn.textContent = 'Tap again to delete'; setTimeout(() => { btn.classList.remove('arm'); btn.textContent = btn.dataset.t; }, 3000); };
@@ -881,6 +908,7 @@ function armDelete(btn, fn) {
 function fmt(t) { try { return new Date(t).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }); } catch (e) { return ''; } }
 
 function openDetail(it, focusComment, focusDelete) {
+  deactivate();
   const img = hasImage(it);
   const vd = visualOf(it);
   const LD = liveOf(it);
